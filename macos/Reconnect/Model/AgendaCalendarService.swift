@@ -52,6 +52,7 @@ actor AgendaCalendarService {
         let calendar = try selectedCalendar(calendarID)
         var masters: [String: EKEvent] = [:]
         var occurrences: [String: Set<Int>] = [:]
+        var editedOccurrences: [String: EventSnapshot] = [:]
         // EventKit silently truncates queries over four years. Fetch the complete supported
         // Agenda range in smaller windows, so out-of-window events never become deletions.
         for year in stride(from: 1980, through: 2100, by: 3) {
@@ -62,12 +63,35 @@ actor AgendaCalendarService {
             let end = gregorian.date(from: DateComponents(year: min(year + 3, 2101), month: 1, day: 1))!
             let predicate = store.predicateForEvents(withStart: start, end: end, calendars: [calendar])
             for event in store.events(matching: predicate) {
-                guard !event.isDetached else {
-                    throw failure("The selected calendar contains an individually edited recurring occurrence. This recurrence needs separate support before it can be synced.")
+                if event.isDetached {
+                    // Canceled exceptions are absent appointments; they still exclude the original date.
+                    guard event.status != .canceled else { continue }
+                    guard let originalDate = event.occurrenceDate else {
+                        throw failure("An edited occurrence has no original date. Calendar cannot identify it safely for sync.")
+                    }
+                    let original = try AgendaSyncContent.LocalDate.from(originalDate,
+                        in: event.isAllDay ? .current : timeZone, allDay: event.isAllDay)
+                    let occurrence = AgendaSyncOccurrence(calendarItemID: event.calendarItemIdentifier, originalDate: original)
+                    let identifier = try occurrence.identifier()
+                    let external = try event.calendarItemExternalIdentifier.map {
+                        try AgendaSyncOccurrence(calendarItemID: $0, originalDate: original).identifier()
+                    }
+                    let content = AgendaSyncOccurrence.standaloneContent(try self.content(of: event, timeZone: timeZone,
+                                                                                         includingRecurrence: false))
+                    if let previous = editedOccurrences[identifier], previous.content != content {
+                        throw failure("Calendar returned conflicting versions of an edited occurrence. Try syncing again.")
+                    }
+                    // Exceptions inherit the series URL, so it cannot serve as their recovery identifier.
+                    editedOccurrences[identifier] = EventSnapshot(id: identifier, externalID: external,
+                                                                  recoveryURL: nil, content: content)
+                    continue
                 }
                 let identifier = event.calendarItemIdentifier
-                if masters[identifier] == nil {
-                    masters[identifier] = store.calendarItem(withIdentifier: identifier) as? EKEvent ?? event
+                if masters[identifier] == nil || event.startDate < masters[identifier]!.startDate {
+                    let candidate = store.calendarItem(withIdentifier: identifier) as? EKEvent
+                    // If EventKit resolves the series ID to a detached first occurrence, use the earliest
+                    // unchanged occurrence as the repeat anchor. Earlier edits remain separate appointments.
+                    masters[identifier] = candidate.flatMap { $0.isDetached ? nil : $0 } ?? event
                 }
                 if event.hasRecurrenceRules {
                     let day = try AgendaSyncContent.LocalDate.from(event.occurrenceDate ?? event.startDate,
@@ -76,19 +100,20 @@ actor AgendaCalendarService {
                 }
             }
         }
-        return try masters.map { identifier, event in
-            var content = try content(of: event, timeZone: timeZone)
-            if let rule = content.repeatRule {
-                let missingDays = try expectedDays(content: content, rule: rule)
-                    .subtracting(occurrences[identifier] ?? []).sorted()
-                content.repeatRule?.excludedDays = missingDays
-                guard (content.repeatRule?.excludedDays.count ?? 0) <= 1024 else {
-                    throw failure("A recurring event has too many exclusions for the supported Agenda profile.")
-                }
-            }
+        let series = try masters.map { identifier, event in
+            let content = try AgendaSyncRecurrence.excludingMissingOccurrences(in: content(of: event, timeZone: timeZone),
+                                                                              observedDays: occurrences[identifier] ?? [])
             return EventSnapshot(id: identifier, externalID: event.calendarItemExternalIdentifier,
                                  recoveryURL: event.url?.absoluteString, content: content)
-        }.sorted { $0.id < $1.id }
+        }
+        return (series + Array(editedOccurrences.values)).sorted { $0.id < $1.id }
+    }
+
+    func validateChange(_ content: AgendaSyncContent?, replacing identifier: String?, timeZone: TimeZone) throws {
+        if let identifier, AgendaSyncOccurrence(identifier: identifier) != nil {
+            throw failure("Writing Psion edits back to an individually edited Calendar occurrence is not supported yet. Use Mac Calendar → Agenda to preserve Calendar as the source.")
+        }
+        if let content { try validateWrite(content, timeZone: timeZone) }
     }
 
     func validateWrite(_ content: AgendaSyncContent, timeZone: TimeZone) throws {
@@ -108,6 +133,7 @@ actor AgendaCalendarService {
     func write(_ content: AgendaSyncContent?, replacing identifier: String?, expected: AgendaSyncContent?,
                calendarID: String, timeZone: TimeZone, recoveryURL: URL) throws -> EventSnapshot? {
         try checkAccess()
+        try validateChange(content, replacing: identifier, timeZone: timeZone)
         let calendar = try selectedCalendar(calendarID)
         guard calendar.allowsContentModifications else { throw failure("The selected Mac calendar is read-only.") }
         let existing = identifier.flatMap { store.calendarItem(withIdentifier: $0) as? EKEvent }
@@ -152,13 +178,13 @@ actor AgendaCalendarService {
                              recoveryURL: event.url?.absoluteString, content: try self.content(of: event, timeZone: timeZone))
     }
 
-    private func content(of event: EKEvent, timeZone: TimeZone) throws -> AgendaSyncContent {
+    private func content(of event: EKEvent, timeZone: TimeZone, includingRecurrence: Bool = true) throws -> AgendaSyncContent {
         guard event.attendees?.isEmpty != false, event.organizer == nil,
               (event.alarms?.count ?? 0) <= 1 else {
             throw failure("An event contains attendees or multiple alarms that the supported Agenda profile cannot preserve.")
         }
         guard event.status != .canceled else { throw failure("The selected calendar contains a canceled event that cannot be mapped to Agenda safely.") }
-        if let sourceZone = event.timeZone, !event.isAllDay, event.hasRecurrenceRules, sourceZone != timeZone {
+        if includingRecurrence, let sourceZone = event.timeZone, !event.isAllDay, event.hasRecurrenceRules, sourceZone != timeZone {
             throw failure("A recurring event uses a different time zone from the Psion. Its recurrence cannot be converted safely.")
         }
         let text = [event.title ?? "", event.notes ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -173,7 +199,7 @@ actor AgendaCalendarService {
             }
             result.alarmMinutes = Int(alarm.relativeOffset / 60)
         }
-        if let rules = event.recurrenceRules, !rules.isEmpty {
+        if includingRecurrence, let rules = event.recurrenceRules, !rules.isEmpty {
             guard rules.count == 1 else { throw failure("Multiple recurrence rules are not supported.") }
             let rule = rules[0]
             guard rule.frequency != .monthly, (rule.recurrenceEnd?.occurrenceCount ?? 0) == 0,
@@ -194,32 +220,6 @@ actor AgendaCalendarService {
         return result
     }
 
-    private func expectedDays(content: AgendaSyncContent, rule: AgendaSyncContent.RepeatRule) throws -> Set<Int> {
-        guard rule.interval > 0, (0...44194).contains(content.start.day) else { throw failure("A repeat starts outside 1980–2100.") }
-        let last = min(rule.untilDay ?? 44194, 44194)
-        guard last >= content.start.day else { return [] }
-        var days = Set<Int>()
-        let firstWeek = content.start.day - (((content.start.day + 1) % 7 - rule.weekStart + 7) % 7)
-        let utc = TimeZone(secondsFromGMT: 0)!
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = utc
-        let start = try AgendaSyncContent.LocalDate(day: content.start.day).date(in: utc)
-        let original = calendar.dateComponents([.year, .month, .day], from: start)
-        for day in content.start.day...last {
-            switch rule.frequency {
-            case .daily:
-                if (day - content.start.day) % rule.interval == 0 { days.insert(day) }
-            case .weekly:
-                if ((day - firstWeek) / 7) % rule.interval == 0, rule.weekdays.contains((day + 1) % 7) { days.insert(day) }
-            case .yearly:
-                let components = calendar.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: 315532800 + Double(day) * 86400))
-                if components.month == original.month, components.day == original.day,
-                   (components.year! - original.year!) % rule.interval == 0 { days.insert(day) }
-            }
-        }
-        return days
-    }
-
     private func selectedCalendar(_ identifier: String) throws -> EKCalendar {
         guard let calendar = store.calendar(withIdentifier: identifier) else {
             throw failure("The selected calendar is unavailable. Choose an available calendar before syncing.")
@@ -227,8 +227,21 @@ actor AgendaCalendarService {
         return calendar
     }
 
-    func verifyMissing(_ identifier: String) throws {
+    func verifyMissing(_ identifier: String, timeZone: TimeZone) throws {
         try checkAccess()
+        if let occurrence = AgendaSyncOccurrence(identifier: identifier) {
+            // A series can remain after one exception is deleted or restored to its regular occurrence.
+            // Only a still-existing detached appointment at the same original date blocks deletion.
+            if let event = store.calendarItem(withIdentifier: occurrence.calendarItemID) as? EKEvent,
+               event.isDetached, let originalDate = event.occurrenceDate {
+                let original = try AgendaSyncContent.LocalDate.from(originalDate,
+                    in: event.isAllDay ? .current : timeZone, allDay: event.isAllDay)
+                if original == occurrence.originalDate {
+                    throw failure("A linked edited occurrence moved outside the selected calendar or supported date range. Resolve that move before syncing.")
+                }
+            }
+            return
+        }
         if store.calendarItem(withIdentifier: identifier) != nil {
             throw failure("A linked Mac event moved outside the selected calendar or supported date range. Resolve that move before syncing.")
         }

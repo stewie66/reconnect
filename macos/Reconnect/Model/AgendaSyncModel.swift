@@ -215,7 +215,7 @@ final class AgendaSyncModel {
                     links[index].macID = recovered.id
                     links[index].externalID = recovered.externalID
                 } else if let oldID = links[index].macID {
-                    try await calendarService.verifyMissing(oldID)
+                    try await calendarService.verifyMissing(oldID, timeZone: timeZone)
                 }
             }
             var linkedAgenda = Set(links.map(\.agendaID))
@@ -257,7 +257,7 @@ final class AgendaSyncModel {
                     else if nativeContent != nil { nativeDeletions.insert(link.agendaID) }
                 }
                 if macContent != result, configuration.direction != .macToAgenda {
-                    if let result { try await calendarService.validateWrite(result, timeZone: timeZone) }
+                    try await calendarService.validateChange(result, replacing: link.macID, timeZone: timeZone)
                     macUpdates.append(index)
                 }
             }
