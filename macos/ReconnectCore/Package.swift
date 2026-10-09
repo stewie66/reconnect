@@ -21,8 +21,14 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "PsionSession",
+            dependencies: [.product(name: "plptools", package: "plptools")],
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "ReconnectCore",
             dependencies: [
+                "PsionSession",
                 .product(name: "Diligence", package: "diligence"),
                 .product(name: "Interact", package: "interact"),
                 .product(name: "OpoLuaCore", package: "opolua"),

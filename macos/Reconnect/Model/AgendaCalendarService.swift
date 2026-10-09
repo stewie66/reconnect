@@ -1,0 +1,246 @@
+import EventKit
+import Foundation
+import PsionFormats
+
+/// EventKit objects stay on this actor; views and the planner receive value snapshots.
+actor AgendaCalendarService {
+    struct CalendarChoice: Identifiable, Equatable, Sendable {
+        var id: String
+        var title: String
+        var writable: Bool
+    }
+
+    struct EventSnapshot: Sendable {
+        var id: String
+        var externalID: String?
+        var recoveryURL: String?
+        var content: AgendaSyncContent
+    }
+
+    private var store = EKEventStore()
+
+    func authorize() async throws {
+        guard try await store.requestFullAccessToEvents() else {
+            throw failure("Allow Calendar access in System Settings → Privacy & Security → Calendars to enable sync.")
+        }
+        store.reset()
+    }
+
+    func calendars() throws -> [CalendarChoice] {
+        try checkAccess()
+        return store.calendars(for: .event).map {
+            CalendarChoice(id: $0.calendarIdentifier, title: $0.title + " — " + $0.source.title,
+                           writable: $0.allowsContentModifications)
+        }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    func createCalendar(title: String) throws -> CalendarChoice {
+        try checkAccess()
+        guard let source = store.sources.first(where: { $0.sourceType == .local }) ?? store.defaultCalendarForNewEvents?.source else {
+            throw failure("No Calendar account is available to create a Psion calendar. Add an account in Calendar, then try again.")
+        }
+        let calendar = EKCalendar(for: .event, eventStore: store)
+        calendar.title = title
+        calendar.source = source
+        try store.saveCalendar(calendar, commit: true)
+        return CalendarChoice(id: calendar.calendarIdentifier, title: calendar.title + " — " + source.title, writable: true)
+    }
+
+    func snapshot(calendarID: String, timeZone: TimeZone) throws -> [EventSnapshot] {
+        try checkAccess()
+        store.reset()
+        let calendar = try selectedCalendar(calendarID)
+        var masters: [String: EKEvent] = [:]
+        var occurrences: [String: Set<Int>] = [:]
+        // EventKit silently truncates queries over four years. Fetch the complete supported
+        // Agenda range in smaller windows, so out-of-window events never become deletions.
+        for year in stride(from: 1980, through: 2100, by: 3) {
+            try Task.checkCancellation()
+            var gregorian = Calendar(identifier: .gregorian)
+            gregorian.timeZone = timeZone
+            let start = gregorian.date(from: DateComponents(year: year, month: 1, day: 1))!
+            let end = gregorian.date(from: DateComponents(year: min(year + 3, 2101), month: 1, day: 1))!
+            let predicate = store.predicateForEvents(withStart: start, end: end, calendars: [calendar])
+            for event in store.events(matching: predicate) {
+                guard !event.isDetached else {
+                    throw failure("The selected calendar contains an individually edited recurring occurrence. This recurrence needs separate support before it can be synced.")
+                }
+                let identifier = event.calendarItemIdentifier
+                if masters[identifier] == nil {
+                    masters[identifier] = store.calendarItem(withIdentifier: identifier) as? EKEvent ?? event
+                }
+                if event.hasRecurrenceRules {
+                    let day = try AgendaSyncContent.LocalDate.from(event.occurrenceDate ?? event.startDate,
+                        in: event.isAllDay ? .current : timeZone, allDay: true).day
+                    occurrences[identifier, default: []].insert(day)
+                }
+            }
+        }
+        return try masters.map { identifier, event in
+            var content = try content(of: event, timeZone: timeZone)
+            if let rule = content.repeatRule {
+                let missingDays = try expectedDays(content: content, rule: rule)
+                    .subtracting(occurrences[identifier] ?? []).sorted()
+                content.repeatRule?.excludedDays = missingDays
+                guard (content.repeatRule?.excludedDays.count ?? 0) <= 1024 else {
+                    throw failure("A recurring event has too many exclusions for the supported Agenda profile.")
+                }
+            }
+            return EventSnapshot(id: identifier, externalID: event.calendarItemExternalIdentifier,
+                                 recoveryURL: event.url?.absoluteString, content: content)
+        }.sorted { $0.id < $1.id }
+    }
+
+    func validateWrite(_ content: AgendaSyncContent, timeZone: TimeZone) throws {
+        guard !content.text.isEmpty else { throw failure("An Agenda entry has no title or text. Give it a title before syncing it to Mac Calendar.") }
+        _ = try content.start.date(in: timeZone)
+        _ = try content.end.date(in: timeZone)
+        guard !content.tentative else { throw failure("EventKit cannot create tentative event status. This Agenda event will be preserved until status mapping is supported.") }
+        if let rule = content.repeatRule {
+            guard rule.interval > 0, rule.interval <= Int(UInt16.max),
+                  rule.weekStart == 0,
+                  rule.excludedDays.isEmpty else {
+                throw failure("Writing repeats with exclusions or a custom fortnightly week start to Mac Calendar is not supported yet. The existing events will be preserved.")
+            }
+        }
+    }
+
+    func write(_ content: AgendaSyncContent?, replacing identifier: String?, expected: AgendaSyncContent?,
+               calendarID: String, timeZone: TimeZone, recoveryURL: URL) throws -> EventSnapshot? {
+        try checkAccess()
+        let calendar = try selectedCalendar(calendarID)
+        guard calendar.allowsContentModifications else { throw failure("The selected Mac calendar is read-only.") }
+        let existing = identifier.flatMap { store.calendarItem(withIdentifier: $0) as? EKEvent }
+        guard identifier == nil || existing != nil else { throw failure("A Mac event changed during sync. Sync again to include its latest state.") }
+        if let existing {
+            var observed = try self.content(of: existing, timeZone: timeZone)
+            observed.repeatRule?.excludedDays = expected?.repeatRule?.excludedDays ?? []
+            guard observed == expected else { throw failure("A Mac event was edited during sync. Its latest edit has been preserved; sync again.") }
+        }
+        guard let content else {
+            if let existing { try store.remove(existing, span: .futureEvents, commit: true) }
+            return nil
+        }
+        try validateWrite(content, timeZone: timeZone)
+        let event = existing ?? EKEvent(eventStore: store)
+        event.calendar = calendar
+        let dateZone = content.start.minute == nil ? TimeZone.current : timeZone
+        event.startDate = try content.start.date(in: dateZone)
+        event.endDate = try content.end.date(in: dateZone)
+        event.isAllDay = content.start.minute == nil
+        event.timeZone = event.isAllDay ? nil : timeZone
+        let components = content.text.components(separatedBy: "\n")
+        event.title = components.first ?? ""
+        event.notes = components.dropFirst().joined(separator: "\n")
+        event.location = content.location
+        if existing == nil { event.url = recoveryURL }
+        event.alarms = content.alarmMinutes.map { [EKAlarm(relativeOffset: Double($0) * 60)] } ?? []
+        if let rule = content.repeatRule {
+            let frequency: EKRecurrenceFrequency = rule.frequency == .daily ? .daily : rule.frequency == .weekly ? .weekly : .yearly
+            let weekdays: [EKRecurrenceDayOfWeek]? = rule.frequency == .weekly ? rule.weekdays.map {
+                EKRecurrenceDayOfWeek(EKWeekday(rawValue: (($0 + 1) % 7) + 1)!)
+            } : nil
+            let end: EKRecurrenceEnd? = try rule.untilDay.map {
+                EKRecurrenceEnd(end: try AgendaSyncContent.LocalDate(day: $0, minute: 1439).date(in: timeZone))
+            }
+            event.recurrenceRules = [EKRecurrenceRule(recurrenceWith: frequency, interval: rule.interval,
+                daysOfTheWeek: weekdays, daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil,
+                daysOfTheYear: nil, setPositions: nil, end: end)]
+        } else { event.recurrenceRules = nil }
+        try store.save(event, span: .futureEvents, commit: true)
+        return EventSnapshot(id: event.calendarItemIdentifier, externalID: event.calendarItemExternalIdentifier,
+                             recoveryURL: event.url?.absoluteString, content: try self.content(of: event, timeZone: timeZone))
+    }
+
+    private func content(of event: EKEvent, timeZone: TimeZone) throws -> AgendaSyncContent {
+        guard event.attendees?.isEmpty != false, event.organizer == nil,
+              (event.alarms?.count ?? 0) <= 1 else {
+            throw failure("An event contains attendees or multiple alarms that the supported Agenda profile cannot preserve.")
+        }
+        guard event.status != .canceled else { throw failure("The selected calendar contains a canceled event that cannot be mapped to Agenda safely.") }
+        if let sourceZone = event.timeZone, !event.isAllDay, event.hasRecurrenceRules, sourceZone != timeZone {
+            throw failure("A recurring event uses a different time zone from the Psion. Its recurrence cannot be converted safely.")
+        }
+        let text = [event.title ?? "", event.notes ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        let dateZone = event.isAllDay ? TimeZone.current : timeZone
+        var result = AgendaSyncContent(text: text, location: event.location ?? "",
+            start: try .from(event.startDate, in: dateZone, allDay: event.isAllDay),
+            end: try .from(event.endDate, in: dateZone, allDay: event.isAllDay), tentative: event.status == .tentative)
+        if let alarm = event.alarms?.first {
+            guard alarm.absoluteDate == nil, alarm.structuredLocation == nil,
+                  alarm.relativeOffset.truncatingRemainder(dividingBy: 60) == 0 else {
+                throw failure("An event has an alarm that cannot be represented on the Psion.")
+            }
+            result.alarmMinutes = Int(alarm.relativeOffset / 60)
+        }
+        if let rules = event.recurrenceRules, !rules.isEmpty {
+            guard rules.count == 1 else { throw failure("Multiple recurrence rules are not supported.") }
+            let rule = rules[0]
+            guard rule.frequency != .monthly, (rule.recurrenceEnd?.occurrenceCount ?? 0) == 0,
+                  rule.daysOfTheMonth?.isEmpty != false, rule.monthsOfTheYear?.isEmpty != false,
+                  rule.daysOfTheYear?.isEmpty != false, rule.weeksOfTheYear?.isEmpty != false,
+                  rule.setPositions?.isEmpty != false,
+                  rule.daysOfTheWeek?.allSatisfy({ $0.weekNumber == 0 }) != false,
+                  rule.frequency == .weekly || rule.daysOfTheWeek?.isEmpty != false else {
+                throw failure("An event has a repeat rule outside the supported daily, weekly or yearly-by-date Agenda profile.")
+            }
+            let weekdays = rule.daysOfTheWeek?.map { (Int($0.dayOfTheWeek.rawValue) + 5) % 7 }.sorted() ?? []
+            let until = try rule.recurrenceEnd?.endDate.map { try AgendaSyncContent.LocalDate.from($0, in: timeZone, allDay: true).day }
+            result.repeatRule = .init(frequency: rule.frequency == .daily ? .daily : rule.frequency == .weekly ? .weekly : .yearly,
+                interval: rule.interval, untilDay: until,
+                weekdays: rule.frequency == .weekly ? (weekdays.isEmpty ? [(result.start.day + 1) % 7] : weekdays) : [],
+                weekStart: rule.firstDayOfTheWeek == 0 ? 0 : (rule.firstDayOfTheWeek + 5) % 7)
+        }
+        return result
+    }
+
+    private func expectedDays(content: AgendaSyncContent, rule: AgendaSyncContent.RepeatRule) throws -> Set<Int> {
+        guard rule.interval > 0, (0...44194).contains(content.start.day) else { throw failure("A repeat starts outside 1980–2100.") }
+        let last = min(rule.untilDay ?? 44194, 44194)
+        guard last >= content.start.day else { return [] }
+        var days = Set<Int>()
+        let firstWeek = content.start.day - (((content.start.day + 1) % 7 - rule.weekStart + 7) % 7)
+        let utc = TimeZone(secondsFromGMT: 0)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        let start = try AgendaSyncContent.LocalDate(day: content.start.day).date(in: utc)
+        let original = calendar.dateComponents([.year, .month, .day], from: start)
+        for day in content.start.day...last {
+            switch rule.frequency {
+            case .daily:
+                if (day - content.start.day) % rule.interval == 0 { days.insert(day) }
+            case .weekly:
+                if ((day - firstWeek) / 7) % rule.interval == 0, rule.weekdays.contains((day + 1) % 7) { days.insert(day) }
+            case .yearly:
+                let components = calendar.dateComponents([.year, .month, .day], from: Date(timeIntervalSince1970: 315532800 + Double(day) * 86400))
+                if components.month == original.month, components.day == original.day,
+                   (components.year! - original.year!) % rule.interval == 0 { days.insert(day) }
+            }
+        }
+        return days
+    }
+
+    private func selectedCalendar(_ identifier: String) throws -> EKCalendar {
+        guard let calendar = store.calendar(withIdentifier: identifier) else {
+            throw failure("The selected calendar is unavailable. Choose an available calendar before syncing.")
+        }
+        return calendar
+    }
+
+    func verifyMissing(_ identifier: String) throws {
+        try checkAccess()
+        if store.calendarItem(withIdentifier: identifier) != nil {
+            throw failure("A linked Mac event moved outside the selected calendar or supported date range. Resolve that move before syncing.")
+        }
+    }
+
+    private func checkAccess() throws {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {
+            throw failure("Calendar access is required. Allow full access to enable sync.")
+        }
+    }
+
+    private func failure(_ message: String) -> NSError {
+        NSError(domain: "Reconnect.CalendarSync", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}

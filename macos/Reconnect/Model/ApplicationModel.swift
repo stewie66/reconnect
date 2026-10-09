@@ -369,6 +369,7 @@ extension ApplicationModel: DaemonClientDelegate {
     func daemonClientDidDisconnect(_ daemonClient: DaemonClient) {
         dispatchPrecondition(condition: .onQueue(.main))
         self.isDaemonConnected = false
+        for device in deviceModels { device.stop() }
         self.deviceModels = []
     }
 
@@ -415,6 +416,7 @@ extension ApplicationModel: DaemonClientDelegate {
     func daemonClient(_ daemonClient: DaemonClient, deviceDidDisconnect connectionDetails: DeviceConnectionDetails) {
         dispatchPrecondition(condition: .onQueue(.main))
         if let deviceModel = deviceModels.first(where: { $0.connectionDetails.id == connectionDetails.id }) {
+            deviceModel.stop()
             connectionDelegate?.applicationModel(self, deviceDidDisconnect: deviceModel)
             deviceModels.removeAll { $0.id == deviceModel.id }
         }

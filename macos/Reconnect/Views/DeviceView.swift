@@ -79,6 +79,10 @@ struct DeviceView: View {
                 }
             }
 
+            if let sync = deviceModel.agendaSync {
+                AgendaSyncView(model: sync)
+            }
+
             DetailsSection("Installed Programs") {
                 ProgramManagerView(deviceModel: deviceModel)
                     .frame(height: 300)

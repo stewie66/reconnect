@@ -32,7 +32,8 @@ struct DeviceToolbar: CustomizableToolbarContent {
     }
 
     var canBackUp: Bool {
-        guard let deviceModel = deviceProxy?.deviceModel, !deviceModel.isBackingUp else {
+        guard let deviceModel = deviceProxy?.deviceModel, !deviceModel.isBackingUp,
+              deviceModel.agendaSync?.isSyncing != true else {
             return false
         }
         return true

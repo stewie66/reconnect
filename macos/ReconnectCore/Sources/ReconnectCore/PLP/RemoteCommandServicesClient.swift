@@ -17,6 +17,7 @@
 // Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 import Foundation
+import PsionSession
 
 import plptools
 
@@ -32,6 +33,66 @@ public class RemoteCommandServicesClient {
     private let workQueue = DispatchQueue(label: "RemoteCommandServicesClient.workQueue")
 
     private var client = RPCSClient()
+    private var agendaSession: OpaquePointer?
+
+    deinit {
+        if let agendaSession { psion_session_close(agendaSession) }
+    }
+
+    private func withAgendaSession<T>(_ action: (OpaquePointer) throws -> T) throws -> T {
+        try workQueue.sync {
+            if agendaSession == nil { agendaSession = psion_session_open(host, port) }
+            guard let agendaSession else { throw ReconnectError.unknown }
+            do { return try action(agendaSession) }
+            catch {
+                psion_session_close(agendaSession)
+                self.agendaSession = nil
+                throw error
+            }
+        }
+    }
+
+    public func processUsingFile(path: String) throws -> String? {
+        try withAgendaSession { session in
+            var buffer = [CChar](repeating: 0, count: 1024)
+            let result = psion_file_owner(session, path.cString(using: deviceEncoding), &buffer, buffer.count)
+            if result == Int32(PLPToolsError.E_PSI_FILE_NXIST.rawValue) { return nil }
+            try checkCommand(result)
+            let value = String(cString: buffer, encoding: deviceEncoding) ?? ""
+            return value.isEmpty ? nil : value
+        }
+    }
+
+    public func executableForProcess(_ process: String) throws -> String {
+        try withAgendaSession { session in
+            var buffer = [CChar](repeating: 0, count: 1024)
+            try checkCommand(psion_program_details(session, process.cString(using: deviceEncoding), &buffer, buffer.count))
+            guard let value = String(cString: buffer, encoding: deviceEncoding), !value.isEmpty else { throw ReconnectError.unknown }
+            return value
+        }
+    }
+
+    public func requestCloseProcess(_ process: String) throws {
+        try withAgendaSession { session in
+            try checkCommand(psion_stop_program(session, process.cString(using: deviceEncoding)))
+        }
+    }
+
+    public func isProcessRunning(_ process: String) throws -> Bool {
+        try withAgendaSession { session in
+            let result = psion_program_running(session, process.cString(using: deviceEncoding))
+            if result == Int32(PLPToolsError.E_PSI_FILE_NXIST.rawValue) { return false }
+            try checkCommand(result)
+            return true
+        }
+    }
+
+    private func checkCommand(_ result: Int32) throws {
+        guard result == 0 else {
+            throw NSError(domain: "Reconnect.PsionCommand", code: Int(result),
+                          userInfo: [NSLocalizedDescriptionKey: "The Psion command failed (\(result))."])
+        }
+    }
 
     public init(host: String = "127.0.0.1", port: Int32, deviceEncoding: StringEncoding) {
         self.host = host

@@ -29,7 +29,7 @@ Contact import accepts structured names and formatted names, home/work telephone
 
 ## Limits
 
-This is file conversion, not synchronization. The `.pbk` suffix does not imply support for every Psion phonebook format; the contained format must match the supported Contacts profile. EPOC16 Agenda and Data files are not supported. Other database versions or contact templates need additional fixtures.
+The conversion APIs perform file conversion. The separate `AgendaSyncDocument` API exposes stable, file-scoped event identities and explicit native upserts/deletions; `AgendaSyncPlanner` performs three-way reconciliation without Calendar or device access. The connected application's EventKit and transport services coordinate actual synchronization; see the [connected sync workflow and limits](../../README.md#connected-agenda-sync). The `.pbk` suffix does not imply support for every Psion phonebook format; the contained format must match the supported Contacts profile. EPOC16 Agenda and Data files are not supported. Other database versions or contact templates need additional fixtures.
 
 Imports reject VTODO, VTIMEZONE definitions, monthly/yearly-by-day repeats, COUNT/RDATE, scheduling messages, attendees, attachments, photos, binary fields, unsupported standard properties and text outside Windows-1252. Vendor X-properties without a native mapping are metadata and are ignored. Unsupported standard fields stop the entire conversion before saving. Contacts imports require the validated `cnt_id_index` schema. Native writing currently requires contiguous live stream slots; files with deleted stream slots need to be compacted on the Psion first. Inputs are limited to 16 MiB of interchange data and 64 MiB of native data. Agenda dates must fall within 1980–2100.
 

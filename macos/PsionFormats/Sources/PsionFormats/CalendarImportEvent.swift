@@ -142,7 +142,7 @@ struct CalendarImportEvent {
         return text.hasPrefix("-") ? -minutes : minutes
     }
 
-    func basic(entryID: UInt32, uniqueID: UInt32, modified: CalendarImportDate) throws -> [UInt8] {
+    func basic(entryID: UInt32, uniqueID: UInt32, modified: CalendarImportDate, deleted: Bool = false) throws -> [UInt8] {
         var writer = BinaryWriter()
         var flags: UInt16 = 0x1008 // inline plain rich text + the native extended record
         if repeatRule != nil { flags |= 2 }
@@ -151,15 +151,17 @@ struct CalendarImportEvent {
         if tentative { flags |= 1024 }
         if type == 3 { flags |= 32 }
         writer.u8(type); writer.u32(entryID); writer.u16(flags); writer.u32(uniqueID)
-        writer.append([replication, 0, 0])
+        writer.append([replication, deleted ? 1 : 0, 0])
         writer.u16(UInt16(modified.day)); writer.u16(UInt16(modified.minute ?? 0))
         if let repeatRule { writer.append(try repeatRule.encoded(start: start)) }
         if let alarmPreTime { try writer.descriptor(""); writer.u32(alarmPreTime) }
-        writer.append([8, 0, 0])
-        var text = try BinaryWriter.text(summary)
-        text = text.map { $0 == 10 ? 6 : $0 }
-        text.append(6)
-        try writer.cardinal(text.count); writer.append(text)
+        if !deleted {
+            writer.append([8, 0, 0])
+            var text = try BinaryWriter.text(summary)
+            text = text.map { $0 == 10 ? 6 : $0 }
+            text.append(6)
+            try writer.cardinal(text.count); writer.append(text)
+        }
         writer.u16(UInt16(start.day))
         if type == 0 {
             writer.u16(UInt16(start.minute!)); writer.u16(UInt16(end.day)); writer.u16(UInt16(end.minute!))

@@ -32,7 +32,8 @@ public struct DeviceCommands: Commands {
     }
 
     var canBackUp: Bool {
-        guard let deviceModel = deviceProxy?.deviceModel, !deviceModel.isBackingUp else {
+        guard let deviceModel = deviceProxy?.deviceModel, !deviceModel.isBackingUp,
+              deviceModel.agendaSync?.isSyncing != true else {
             return false
         }
         return true
@@ -43,10 +44,18 @@ public struct DeviceCommands: Commands {
 
         CommandMenu("Device") {
 
+            Button("Sync Agenda Now") {
+                deviceProxy?.deviceModel.agendaSync?.syncNow()
+            }
+            .disabled(deviceProxy?.deviceModel.agendaSync?.canSync != true)
+
+            Divider()
+
             Button("Back Up...", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90") {
                 deviceProxy?.deviceModel.backUp()
             }
             .keyboardShortcut("B", modifiers: [.command])
+            .disabled(deviceProxy?.deviceModel.agendaSync?.isSyncing == true || !canBackUp)
 
             Button("Capture Screenshot", systemImage: "camera.viewfinder") {
                 deviceProxy?.deviceModel.captureScreenshot()

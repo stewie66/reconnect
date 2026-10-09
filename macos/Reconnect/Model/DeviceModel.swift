@@ -160,6 +160,9 @@ class DeviceModel: Identifiable, Equatable, @unchecked Sendable {
     @MainActor
     var isBackingUp: Bool = false
 
+    @MainActor
+    var agendaSync: AgendaSyncModel?
+
     var id: UUID {
         return deviceConfiguration.id
     }
@@ -237,6 +240,11 @@ class DeviceModel: Identifiable, Equatable, @unchecked Sendable {
     func start() {
         DispatchQueue.main.async { [self] in
             delegate?.deviceModel(deviceModel: self, didUpdateName: name)
+            if machineType.isEpoc32, let applicationModel {
+                let sync = AgendaSyncModel(device: self, applicationModel: applicationModel)
+                agendaSync = sync
+                sync.start()
+            }
         }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             do {
@@ -252,6 +260,11 @@ class DeviceModel: Identifiable, Equatable, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    @MainActor
+    func stop() {
+        agendaSync?.stop()
     }
 
     private func runInBackground(perform: @escaping () throws -> Void) {
