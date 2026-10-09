@@ -17,6 +17,7 @@
 // Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 import os
+import ReconnectCore
 import ServiceManagement
 import SwiftUI
 
@@ -24,7 +25,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let logger = Logger()
-    private let service = SMAppService.agent(plistName: "uk.co.jbmorley.reconnect.apps.apple.reconnectd.plist")
+    private let service = SMAppService.agent(plistName: .daemonLaunchAgentPlistName)
     private var ownsDaemon = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -42,10 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func enableDaemon() {
-        ownsDaemon = true
         do {
             logger.notice("Registering reconnectd...")
-            try SMAppService.agent(plistName: "uk.co.jbmorley.reconnect.apps.apple.reconnectd.plist").register()
+            try service.register()
+            ownsDaemon = true
             logger.notice("Successfully registered reconnectd")
         } catch {
             logger.error("Failed to register reconnectd with error '\(error)'")
@@ -58,7 +59,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             logger.notice("Unregistering reconnectd...")
-            try SMAppService.agent(plistName: "uk.co.jbmorley.reconnect.apps.apple.reconnectd.plist").unregister()
+            try service.unregister()
+            ownsDaemon = false
             logger.notice("Successfully unregistered reconnectd")
         } catch {
             logger.error("Failed to unregister reconnectd with error '\(error)'")

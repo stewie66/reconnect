@@ -38,10 +38,17 @@ public extension String {
 
     static let windowsPathSeparator = "\\"
 
+    // Development builds must not reuse a released app's Service Management registration.
+    // macOS retains its signing requirements even after the service is unregistered.
+    #if DEBUG
+    static let browserApplicationBundleIdentifier = "uk.co.jbmorley.reconnect.apps.apple.debug"
+    #else
     static let browserApplicationBundleIdentifier = "uk.co.jbmorley.reconnect.apps.apple"
-    static let menuApplicationBundleIdentifier = "uk.co.jbmorley.reconnect.apps.apple.menu"
+    #endif
+    static let menuApplicationBundleIdentifier = browserApplicationBundleIdentifier + ".menu"
 
-    static let daemonSericeName = "uk.co.jbmorley.reconnect.apps.apple.xpc.daemon"
+    static let daemonSericeName = browserApplicationBundleIdentifier + ".xpc.daemon"
+    static let daemonLaunchAgentPlistName = browserApplicationBundleIdentifier + ".reconnectd.plist"
 
     static let settingsWindowIdentifier = "settings"
 

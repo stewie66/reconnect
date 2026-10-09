@@ -164,6 +164,7 @@
 			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
 			buildPhase = D8B2B2632E307AFD00F4B27E /* CopyFiles */;
 			membershipExceptions = (
+				uk.co.jbmorley.reconnect.apps.apple.debug.reconnectd.plist,
 				uk.co.jbmorley.reconnect.apps.apple.reconnectd.plist,
 			);
 		};
@@ -754,7 +755,7 @@
 				);
 				MARKETING_VERSION = 1.0;
 				OTHER_CODE_SIGN_FLAGS = "--deep";
-				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple;
+				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -882,6 +883,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = reconnectd/Info.plist;
 				MARKETING_VERSION = 0.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple.debug.reconnectd;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_VERSION = 5.0;
@@ -925,7 +927,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple.previews;
+				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple.debug.previews;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -986,7 +988,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple.menu;
+				PRODUCT_BUNDLE_IDENTIFIER = uk.co.jbmorley.reconnect.apps.apple.debug.menu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
