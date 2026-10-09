@@ -15,6 +15,7 @@ actor AgendaCalendarService {
         var externalID: String?
         var recoveryURL: String?
         var content: AgendaSyncContent
+        var notices: Set<AgendaSyncCalendarProjection.Notice> = []
     }
 
     private var store = EKEventStore()
@@ -46,7 +47,7 @@ actor AgendaCalendarService {
         return CalendarChoice(id: calendar.calendarIdentifier, title: calendar.title + " — " + source.title, writable: true)
     }
 
-    func snapshot(calendarID: String, timeZone: TimeZone) throws -> [EventSnapshot] {
+    func snapshot(calendarID: String, timeZone: TimeZone, allowSourceOnlyMetadata: Bool = false) throws -> [EventSnapshot] {
         try checkAccess()
         store.reset()
         let calendar = try selectedCalendar(calendarID)
@@ -76,14 +77,15 @@ actor AgendaCalendarService {
                     let external = try event.calendarItemExternalIdentifier.map {
                         try AgendaSyncOccurrence(calendarItemID: $0, originalDate: original).identifier()
                     }
-                    let content = AgendaSyncOccurrence.standaloneContent(try self.content(of: event, timeZone: timeZone,
-                                                                                         includingRecurrence: false))
+                    let projection = try readProjection(of: event, timeZone: timeZone, includingRecurrence: false,
+                                                        allowSourceOnlyMetadata: allowSourceOnlyMetadata)
+                    let content = AgendaSyncOccurrence.standaloneContent(projection.content)
                     if let previous = editedOccurrences[identifier], previous.content != content {
                         throw failure("Calendar returned conflicting versions of an edited occurrence. Try syncing again.")
                     }
                     // Exceptions inherit the series URL, so it cannot serve as their recovery identifier.
                     editedOccurrences[identifier] = EventSnapshot(id: identifier, externalID: external,
-                                                                  recoveryURL: nil, content: content)
+                                                                  recoveryURL: nil, content: content, notices: projection.notices)
                     continue
                 }
                 let identifier = event.calendarItemIdentifier
@@ -101,10 +103,12 @@ actor AgendaCalendarService {
             }
         }
         let series = try masters.map { identifier, event in
-            let content = try AgendaSyncRecurrence.excludingMissingOccurrences(in: content(of: event, timeZone: timeZone),
+            let projection = try readProjection(of: event, timeZone: timeZone,
+                                                allowSourceOnlyMetadata: allowSourceOnlyMetadata)
+            let content = try AgendaSyncRecurrence.excludingMissingOccurrences(in: projection.content,
                                                                               observedDays: occurrences[identifier] ?? [])
             return EventSnapshot(id: identifier, externalID: event.calendarItemExternalIdentifier,
-                                 recoveryURL: event.url?.absoluteString, content: content)
+                                 recoveryURL: event.url?.absoluteString, content: content, notices: projection.notices)
         }
         return (series + Array(editedOccurrences.values)).sorted { $0.id < $1.id }
     }
@@ -178,10 +182,28 @@ actor AgendaCalendarService {
                              recoveryURL: event.url?.absoluteString, content: try self.content(of: event, timeZone: timeZone))
     }
 
-    private func content(of event: EKEvent, timeZone: TimeZone, includingRecurrence: Bool = true) throws -> AgendaSyncContent {
-        guard event.attendees?.isEmpty != false, event.organizer == nil,
-              (event.alarms?.count ?? 0) <= 1 else {
-            throw failure("An event contains attendees or multiple alarms that the supported Agenda profile cannot preserve.")
+    private func content(of event: EKEvent, timeZone: TimeZone) throws -> AgendaSyncContent {
+        try projection(of: event, timeZone: timeZone).content
+    }
+
+    private func readProjection(of event: EKEvent, timeZone: TimeZone, includingRecurrence: Bool = true,
+                                allowSourceOnlyMetadata: Bool) throws -> AgendaSyncCalendarProjection {
+        do {
+            return try projection(of: event, timeZone: timeZone, includingRecurrence: includingRecurrence,
+                                  allowSourceOnlyMetadata: allowSourceOnlyMetadata)
+        } catch {
+            let title = event.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled event"
+            throw failure("Calendar event “\(title)”: " + error.localizedDescription)
+        }
+    }
+
+    private func projection(of event: EKEvent, timeZone: TimeZone, includingRecurrence: Bool = true,
+                            allowSourceOnlyMetadata: Bool = false) throws -> AgendaSyncCalendarProjection {
+        if !allowSourceOnlyMetadata {
+            guard event.attendees?.isEmpty != false, event.organizer == nil,
+                  (event.alarms?.count ?? 0) <= 1 else {
+                throw failure("Invitations and multiple alerts require Mac Calendar → Agenda. This direction copies appointment details without changing the Calendar invitation or its alerts.")
+            }
         }
         guard event.status != .canceled else { throw failure("The selected calendar contains a canceled event that cannot be mapped to Agenda safely.") }
         if includingRecurrence, let sourceZone = event.timeZone, !event.isAllDay, event.hasRecurrenceRules, sourceZone != timeZone {
@@ -192,12 +214,16 @@ actor AgendaCalendarService {
         var result = AgendaSyncContent(text: text, location: event.location ?? "",
             start: try .from(event.startDate, in: dateZone, allDay: event.isAllDay),
             end: try .from(event.endDate, in: dateZone, allDay: event.isAllDay), tentative: event.status == .tentative)
-        if let alarm = event.alarms?.first {
+        if !allowSourceOnlyMetadata, let alarm = event.alarms?.first {
+            let seconds = alarm.relativeOffset
+            let minutes = seconds / 60
             guard alarm.absoluteDate == nil, alarm.structuredLocation == nil,
-                  alarm.relativeOffset.truncatingRemainder(dividingBy: 60) == 0 else {
+                  alarm.type == .display || alarm.type == .audio,
+                  seconds.isFinite, seconds.truncatingRemainder(dividingBy: 60) == 0,
+                  minutes >= 1440 - Double(UInt32.max), minutes <= 1440 else {
                 throw failure("An event has an alarm that cannot be represented on the Psion.")
             }
-            result.alarmMinutes = Int(alarm.relativeOffset / 60)
+            result.alarmMinutes = Int(minutes)
         }
         if includingRecurrence, let rules = event.recurrenceRules, !rules.isEmpty {
             guard rules.count == 1 else { throw failure("Multiple recurrence rules are not supported.") }
@@ -217,7 +243,18 @@ actor AgendaCalendarService {
                 weekdays: rule.frequency == .weekly ? (weekdays.isEmpty ? [(result.start.day + 1) % 7] : weekdays) : [],
                 weekStart: rule.firstDayOfTheWeek == 0 ? 0 : (rule.firstDayOfTheWeek + 5) % 7)
         }
-        return result
+        if allowSourceOnlyMetadata {
+            let alarms: [AgendaSyncCalendarProjection.Alarm] = (event.alarms ?? []).map { alarm in
+                guard alarm.structuredLocation == nil, alarm.type == .display || alarm.type == .audio else {
+                    return .unsupported
+                }
+                if let date = alarm.absoluteDate { return .absolute(date) }
+                return .relative(seconds: alarm.relativeOffset)
+            }
+            return .project(result, hasInvitationDetails: event.attendees?.isEmpty == false || event.organizer != nil,
+                            alarms: alarms, eventStart: event.startDate)
+        }
+        return AgendaSyncCalendarProjection(content: result)
     }
 
     private func selectedCalendar(_ identifier: String) throws -> EKCalendar {

@@ -66,6 +66,14 @@ struct AgendaSyncView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if model.settings.direction == .macToAgenda {
+                Text("Mac Calendar → Agenda copies appointment details and the earliest supported alert. Invitation details and extra alerts stay in Mac Calendar.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack {
                 if model.isSyncing {
                     ProgressView(model.status)
@@ -91,6 +99,14 @@ struct AgendaSyncView: View {
             if let message = model.errorMessage {
                 Text(message)
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            if let message = model.importNotice {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)

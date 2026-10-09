@@ -36,6 +36,7 @@ final class AgendaSyncModel {
     private(set) var isConnected = true
     private(set) var status = "Choose an Agenda file and a Mac calendar to enable sync."
     private(set) var errorMessage: String?
+    private(set) var importNotice: String?
     private(set) var lastSuccessfulSync: Date?
     private(set) var automaticPaused = false
     private(set) var isCreatingCalendar = false
@@ -157,6 +158,7 @@ final class AgendaSyncModel {
         isSyncing = true
         automaticPaused = false
         errorMessage = nil
+        importNotice = nil
         syncTask = Task { await performSync(automatic: automatic) }
     }
 
@@ -188,7 +190,9 @@ final class AgendaSyncModel {
                 throw failure("Choose an available calendar. Syncing to Mac Calendar requires a writable calendar.")
             }
             status = "Reading Mac Calendar…"
-            let macEvents = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone)
+            let macEvents = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
+                                                               allowSourceOnlyMetadata: configuration.direction == .macToAgenda)
+            reportImportNotices(macEvents)
             let initialMac = Dictionary(uniqueKeysWithValues: macEvents.map { ($0.id, $0.content) })
             if automatic, lastMacSnapshot == initialMac, let lastMetadata {
                 let metadata = try await transport.metadata(path: path)
@@ -294,7 +298,9 @@ final class AgendaSyncModel {
                 try state.save(to: stateURL)
             }
             try await transport.verifyUnchanged(path: path, original: replacement)
-            let finalMac = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone)
+            let finalMac = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
+                                                              allowSourceOnlyMetadata: configuration.direction == .macToAgenda)
+            reportImportNotices(finalMac)
             let finalMap = Dictionary(uniqueKeysWithValues: finalMac.map { ($0.id, $0.content) })
             for index in state.links.indices {
                 let link = state.links[index]
@@ -339,6 +345,26 @@ final class AgendaSyncModel {
 
     private func recoveryURL(pairing: UUID, link: UUID) -> URL {
         URL(string: "x-reconnect://agenda-sync/\(pairing.uuidString)/\(link.uuidString)")!
+    }
+
+    private func reportImportNotices(_ events: [AgendaCalendarService.EventSnapshot]) {
+        var messages: [String] = []
+        for notice in AgendaSyncCalendarProjection.Notice.allCases {
+            let count = events.filter { $0.notices.contains(notice) }.count
+            guard count > 0 else { continue }
+            let appointments = "\(count) " + (count == 1 ? "appointment" : "appointments")
+            switch notice {
+            case .invitationDetails:
+                messages.append("Invitation details for \(appointments) stay in Mac Calendar.")
+            case .extraAlarms:
+                messages.append("Extra alerts for \(appointments) stay in Mac Calendar. Agenda keeps the earliest supported alert, if available.")
+            case .unsupportedAlarms:
+                messages.append("Alerts Agenda cannot represent for \(appointments) stay in Mac Calendar.")
+            case .convertedAbsoluteAlarm:
+                messages.append("Dated alerts for \(appointments) are represented relative to the appointment start.")
+            }
+        }
+        importNotice = messages.isEmpty ? nil : "Agenda import notes:\n" + messages.joined(separator: "\n")
     }
 
     private func failure(_ message: String) -> NSError {
