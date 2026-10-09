@@ -1,6 +1,38 @@
 import Foundation
 
 public enum AgendaSyncRecurrence {
+    public struct Occurrence: Equatable, Sendable {
+        public var start: AgendaSyncContent.LocalDate
+        public var end: AgendaSyncContent.LocalDate
+
+        public init(start: AgendaSyncContent.LocalDate, end: AgendaSyncContent.LocalDate) {
+            self.start = start
+            self.end = end
+        }
+    }
+
+    /// Converts a repeat's weekdays into the destination zone, then checks the full observed
+    /// schedule. A varying local hour or a date pattern Agenda cannot express needs expansion.
+    public static func converted(_ content: AgendaSyncContent, sourceStart: AgendaSyncContent.LocalDate,
+                                 occurrences: [Occurrence]) throws -> AgendaSyncContent? {
+        guard var rule = content.repeatRule, !occurrences.isEmpty else { return nil }
+        let dayShift = content.start.day - sourceStart.day
+        func shifted(_ day: Int) -> Int { ((day + dayShift) % 7 + 7) % 7 }
+        if rule.frequency == .weekly {
+            rule.weekdays = rule.weekdays.map(shifted).sorted()
+            rule.weekStart = shifted(rule.weekStart)
+        }
+        var converted = content
+        converted.repeatRule = rule
+        guard occurrences.allSatisfy({
+            $0.start.minute == converted.start.minute && $0.end.minute == converted.end.minute &&
+            $0.end.day - $0.start.day == converted.end.day - converted.start.day
+        }) else { return nil }
+        let observed = Set(occurrences.map { $0.start.day })
+        guard try observed.isSubset(of: expectedDays(content: converted, rule: rule)) else { return nil }
+        return try excludingMissingOccurrences(in: converted, observedDays: observed)
+    }
+
     /// Only unchanged occurrences count as present. Edited and deleted dates become exclusions;
     /// edited appointments are supplied separately, preserving both their original and moved dates.
     public static func excludingMissingOccurrences(in content: AgendaSyncContent,

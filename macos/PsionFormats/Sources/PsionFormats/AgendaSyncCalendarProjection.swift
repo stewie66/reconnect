@@ -11,6 +11,7 @@ public struct AgendaSyncCalendarProjection: Sendable, Equatable {
 
     public enum Notice: String, CaseIterable, Sendable {
         case invitationDetails, extraAlarms, unsupportedAlarms, convertedAbsoluteAlarm
+        case convertedTimeZone, expandedRecurrence
     }
 
     public var content: AgendaSyncContent

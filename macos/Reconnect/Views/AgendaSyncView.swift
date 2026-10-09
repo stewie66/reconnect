@@ -72,6 +72,11 @@ struct AgendaSyncView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Recurring events are converted to Psion local time. Schedules that need different local hours are copied as individual appointments within 1980–2100.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack {

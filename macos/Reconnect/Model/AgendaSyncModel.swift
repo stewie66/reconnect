@@ -190,8 +190,9 @@ final class AgendaSyncModel {
                 throw failure("Choose an available calendar. Syncing to Mac Calendar requires a writable calendar.")
             }
             status = "Reading Mac Calendar…"
-            let macEvents = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
-                                                               allowSourceOnlyMetadata: configuration.direction == .macToAgenda)
+            let macSnapshot = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
+                                                                 allowSourceOnlyMetadata: configuration.direction == .macToAgenda)
+            let macEvents = macSnapshot.events
             reportImportNotices(macEvents)
             let initialMac = Dictionary(uniqueKeysWithValues: macEvents.map { ($0.id, $0.content) })
             if automatic, lastMacSnapshot == initialMac, let lastMetadata {
@@ -219,7 +220,11 @@ final class AgendaSyncModel {
                     links[index].macID = recovered.id
                     links[index].externalID = recovered.externalID
                 } else if let oldID = links[index].macID {
-                    try await calendarService.verifyMissing(oldID, timeZone: timeZone)
+                    // Calendar still owns an expanded series. Retire its old aggregate mapping so
+                    // the repeating Agenda entry and its individual appointments cannot coexist.
+                    if !macSnapshot.replacedSeriesIDs.contains(oldID) {
+                        try await calendarService.verifyMissing(oldID, timeZone: timeZone)
+                    }
                 }
             }
             var linkedAgenda = Set(links.map(\.agendaID))
@@ -299,7 +304,7 @@ final class AgendaSyncModel {
             }
             try await transport.verifyUnchanged(path: path, original: replacement)
             let finalMac = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
-                                                              allowSourceOnlyMetadata: configuration.direction == .macToAgenda)
+                                                              allowSourceOnlyMetadata: configuration.direction == .macToAgenda).events
             reportImportNotices(finalMac)
             let finalMap = Dictionary(uniqueKeysWithValues: finalMac.map { ($0.id, $0.content) })
             for index in state.links.indices {
@@ -362,6 +367,10 @@ final class AgendaSyncModel {
                 messages.append("Alerts Agenda cannot represent for \(appointments) stay in Mac Calendar.")
             case .convertedAbsoluteAlarm:
                 messages.append("Dated alerts for \(appointments) are represented relative to the appointment start.")
+            case .convertedTimeZone:
+                messages.append("Repeating times for \(appointments) are converted to the Psion time zone.")
+            case .expandedRecurrence:
+                messages.append("\(appointments) are copied individually to preserve Calendar's time-zone schedule within 1980–2100.")
             }
         }
         importNotice = messages.isEmpty ? nil : "Agenda import notes:\n" + messages.joined(separator: "\n")
