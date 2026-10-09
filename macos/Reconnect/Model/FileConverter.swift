@@ -33,6 +33,8 @@ enum FileType: String, Identifiable {
     case text
     case markdown
     case pic
+    case contacts
+    case agenda
 
 }
 
@@ -50,6 +52,10 @@ extension FileType {
             return "Markdown (.md)"
         case .pic:
             return "EPOC16 Image (.pic)"
+        case .contacts:
+            return "EPOC32 Contacts (.cdb, .pbk)"
+        case .agenda:
+            return "EPOC32 Agenda (.agn)"
         }
     }
 
@@ -58,6 +64,7 @@ extension FileType {
 extension FileType {
 
     func matches(directoryEntry: FileServer.DirectoryEntry) -> Bool {
+        guard !directoryEntry.isDirectory else { return false }
         switch self {
         case .mbm:
             return directoryEntry.fileType == .mbm || directoryEntry.pathExtension.lowercased() == "mbm"
@@ -69,6 +76,10 @@ extension FileType {
             return directoryEntry.pathExtension.lowercased() == "md"
         case .pic:
             return directoryEntry.pathExtension.lowercased() == "pic"
+        case .contacts:
+            return directoryEntry.fileType == .contacts || ["cdb", "pbk"].contains(directoryEntry.pathExtension.lowercased())
+        case .agenda:
+            return directoryEntry.fileType == .agenda || directoryEntry.pathExtension.lowercased() == "agn"
         }
     }
 
@@ -81,6 +92,8 @@ enum ConversionIdentifier: String {
     case wordToText
     case windowsAsciiToUnixUnicode
     case picToPng
+    case contactsToVCard
+    case agendaToICalendar
 
 }
 
@@ -98,6 +111,10 @@ extension ConversionIdentifier {
             return .textConversion
         case .picToPng:
             return .picConversion
+        case .contactsToVCard:
+            return .contactsConversion
+        case .agendaToICalendar:
+            return .agendaConversion
         }
     }
 
@@ -114,6 +131,10 @@ extension ConversionIdentifier {
             return "UTF8 with Unix Line Endings"
         case .picToPng:
             return "PNG"
+        case .contactsToVCard:
+            return "vCard (.vcf)"
+        case .agendaToICalendar:
+            return "iCalendar (.ics)"
         }
     }
 
@@ -140,9 +161,17 @@ class FileConverter {
         .text: .windowsAsciiToUnixUnicode,
         .markdown: .windowsAsciiToUnixUnicode,
         .pic: .picToPng,
+        .contacts: .contactsToVCard,
+        .agenda: .agendaToICalendar,
     ]
 
     private static func converter(for directoryEntry: FileServer.DirectoryEntry) -> Conversion? {
+        // Psion UIDs identify extensionless files and take precedence over an arbitrary filename suffix.
+        switch directoryEntry.fileType {
+        case .contacts: return .contactsConversion
+        case .agenda: return .agendaConversion
+        default: break
+        }
         return converters.first {
             $0.key.matches(directoryEntry: directoryEntry)
         }?.value.conversion

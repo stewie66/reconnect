@@ -6,6 +6,12 @@ Psion connectivity for macOS.
 
 <img width="1078" src="images/screenshot@2x.png">
 
+## Contacts and Agenda conversion
+
+With **Convert Files** enabled in Settings, Reconnect exports supported EPOC32 Contacts databases as vCard (`.vcf`) and Agenda files as iCalendar (`.ics`) when downloading or dragging files to another application. Names without extensions are recognized using their Psion file UIDs. Downloads retain the original binary file alongside the converted file.
+
+The converters are read-only and currently support the ER5 Contacts DBMS 0x100 template and Agenda model 1.1.84. See [conversion details and validation](macos/PsionFormats/README.md) for supported fields and limits.
+
 ## Contributing
 
 We invite and welcome contributions! There's a pretty comprehensive list of [issues](https://github.com/inseven/reconnect/issues) to get you started, and our documentation is always in need of some care and attention.

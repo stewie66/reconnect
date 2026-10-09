@@ -20,6 +20,7 @@ import SwiftUI
 import OpoLuaCore
 import ReconnectCore
 import Word2text
+import PsionFormats
 
 struct Conversion {
 
@@ -77,6 +78,43 @@ extension Conversion {
         try PsiLuaEnv().convertPicToPNG(sourceURL: sourceURL, destinationURL: outputURL)
         try FileManager.default.removeItem(at: sourceURL)
         return outputURL
+    }
+
+    static let contactsConversion: Self = Self { entry in
+        interchangeFilename(for: entry.name, pathExtension: "vcf")
+    } perform: { sourceURL, destinationURL in
+        let outputURL = destinationURL.appendingPathComponent(interchangeFilename(for: sourceURL.lastPathComponent, pathExtension: "vcf"))
+        let accessing = sourceURL.startAccessingSecurityScopedResource()
+        let accessingDestination = destinationURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessing { sourceURL.stopAccessingSecurityScopedResource() }
+            if accessingDestination { destinationURL.stopAccessingSecurityScopedResource() }
+        }
+        let output = try ContactsConverter.convert(Data(contentsOf: sourceURL))
+        try output.write(to: outputURL, options: .atomic)
+        return outputURL
+    }
+
+    static let agendaConversion: Self = Self { entry in
+        interchangeFilename(for: entry.name, pathExtension: "ics")
+    } perform: { sourceURL, destinationURL in
+        let outputURL = destinationURL.appendingPathComponent(interchangeFilename(for: sourceURL.lastPathComponent, pathExtension: "ics"))
+        let accessing = sourceURL.startAccessingSecurityScopedResource()
+        let accessingDestination = destinationURL.startAccessingSecurityScopedResource()
+        defer {
+            if accessing { sourceURL.stopAccessingSecurityScopedResource() }
+            if accessingDestination { destinationURL.stopAccessingSecurityScopedResource() }
+        }
+        let output = try AgendaConverter.convert(Data(contentsOf: sourceURL))
+        try output.write(to: outputURL, options: .atomic)
+        return outputURL
+    }
+
+    private static func interchangeFilename(for name: String, pathExtension: String) -> String {
+        let convertedName = name.replacingPathExtension(pathExtension)
+        // A binary file can already have the export suffix. Preserve it on case-insensitive volumes too.
+        guard convertedName.lowercased() == name.lowercased() else { return convertedName }
+        return name.deletingPathExtension + " (Converted)." + pathExtension
     }
 
 }

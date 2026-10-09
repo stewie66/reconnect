@@ -28,6 +28,7 @@ public enum FileType {
     case opl
     case data
     case agenda
+    case contacts
     case sketch
     case jotter
     case mbm
@@ -54,6 +55,8 @@ extension FileType {
             return "Data"
         case .agenda:
             return "Agenda"
+        case .contacts:
+            return "Contacts"
         case .sketch:
             return "Sketch"
         case .jotter:
@@ -81,6 +84,8 @@ extension FileType {
             return "Data16"
         case .agenda:
             return "Agenda16"
+        case .contacts:
+            return "Data16"
         case .sketch:
             return "Sketch16"
         case .jotter:

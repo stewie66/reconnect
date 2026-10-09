@@ -113,6 +113,7 @@ function cleanup {
 trap cleanup EXIT
 
 # Build and test ReconnectCore.
+swift test --package-path PsionFormats
 swift build --package-path ReconnectCore
 swift test --package-path ReconnectCore
 

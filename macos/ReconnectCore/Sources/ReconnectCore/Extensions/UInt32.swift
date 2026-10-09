@@ -31,6 +31,7 @@ public extension UInt32 {
     // UID2
     static let appDllDoc: Self = 0x1000006D
     static let mbm: Self = 0x10000042
+    static let contactsDatabase: Self = 0x10000EBE
 
     // UID3
     static let word: Self = 0x1000007F

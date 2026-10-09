@@ -37,6 +37,8 @@ extension FileServer.DirectoryEntry {
                 return .data
             case (.permanentFileStoreLayout, .appDllDoc, .agenda):
                 return .agenda
+            case (.permanentFileStoreLayout, .contactsDatabase, .none):
+                return .contacts
             case (.directFileStore, .appDllDoc, .sketch):
                 return .sketch
             case (.permanentFileStoreLayout, .appDllDoc, .jotter):
