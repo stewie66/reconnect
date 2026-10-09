@@ -4,10 +4,12 @@ import Foundation
 public struct AgendaSyncOccurrence: Codable, Equatable, Sendable {
     public var calendarItemID: String
     public var originalDate: AgendaSyncContent.LocalDate
+    public var originalInstant: Date?
 
-    public init(calendarItemID: String, originalDate: AgendaSyncContent.LocalDate) {
+    public init(calendarItemID: String, originalDate: AgendaSyncContent.LocalDate, originalInstant: Date? = nil) {
         self.calendarItemID = calendarItemID
         self.originalDate = originalDate
+        self.originalInstant = originalInstant
     }
 
     public func identifier() throws -> String {

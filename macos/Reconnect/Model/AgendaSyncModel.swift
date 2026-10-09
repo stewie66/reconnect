@@ -391,6 +391,14 @@ final class AgendaSyncModel {
                 messages.append("Repeating times for \(appointments) are converted to the Psion time zone.")
             case .expandedRecurrence:
                 messages.append("\(appointments) are copied individually to preserve Calendar's repeat schedule within 1980–2100.")
+            case .roundedTimes:
+                messages.append("Times for \(appointments) are rounded to the nearest minute in Agenda.")
+            case .convertedText:
+                messages.append("Text for \(appointments) is transliterated where possible; unsupported characters use ?. Original text stays in Mac Calendar.")
+            case .placeholderText:
+                messages.append("\(appointments) without text use Untitled appointment in Agenda.")
+            case .reanchoredRecurrence:
+                messages.append("\(appointments) whose series started before 1980 begin at their first supported occurrence. The original series date is kept in Agenda notes.")
             }
         }
         importNotice = messages.isEmpty ? nil : "Agenda import notes:\n" + messages.joined(separator: "\n")

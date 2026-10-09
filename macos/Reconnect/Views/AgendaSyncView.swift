@@ -67,7 +67,7 @@ struct AgendaSyncView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if model.settings.direction == .macToAgenda {
-                Text("Mac Calendar → Agenda copies appointment details and the earliest supported alert. Invitation details and extra alerts stay in Mac Calendar.")
+                Text("Mac Calendar → Agenda copies appointment details and the earliest supported alert. Times are rounded to whole minutes, unsupported text is transliterated or replaced with ?, and empty entries receive a title. Original details stay in Mac Calendar.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
