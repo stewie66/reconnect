@@ -12,6 +12,66 @@ final class ImportTests: XCTestCase {
     var meeting: Data { calendar("DTSTART:20261009T090000\nDTEND:20261009T100000\nLOCATION:Library") }
     var card: Data { Data("BEGIN:VCARD\nVERSION:3.0\nUID:sample-contact\nFN:Alex Example\nN:Example;Alex;;;\nTEL;TYPE=HOME,CELL:+61 400000000\nEMAIL;TYPE=HOME:alex@example.test\nBDAY:2000-01-01\nNOTE:Line one\\nLine two\nEND:VCARD\n".utf8) }
 
+    func testAutomaticFileCreationWithoutTemplates() throws {
+        let agenda = try AgendaImporter.create(meeting, timeZone: zone, timestamp: timestamp)
+        XCTAssertEqual(agenda.addedCount, 1)
+        let events = String(decoding: try AgendaConverter.convert(agenda.data), as: UTF8.self)
+        XCTAssertTrue(events.contains("DTSTART:20261009T090000"))
+        XCTAssertTrue(events.contains("LOCATION:Library"))
+        XCTAssertEqual(try AgendaImporter.convert(meeting, using: agenda.data, mode: .merge, timeZone: zone).skippedCount, 1)
+        let contacts = try ContactsImporter.create(card, timestamp: timestamp)
+        XCTAssertEqual(contacts.addedCount, 1)
+        let parsed = try CNContactVCardSerialization.contacts(with: ContactsConverter.convert(contacts.data))
+        XCTAssertEqual(parsed.first?.givenName, "Alex")
+        XCTAssertEqual(parsed.first?.birthday?.year, 2000)
+        XCTAssertEqual(try ContactsImporter.convert(card, using: contacts.data, mode: .merge).skippedCount, 1)
+        if let export = ProcessInfo.processInfo.environment["PSION_IMPORT_EXPORT_DIRECTORY"] {
+            let directory = URL(fileURLWithPath: export)
+            try agenda.data.write(to: directory.appendingPathComponent("Reconnect-auto-agenda.agn"), options: .atomic)
+            try contacts.data.write(to: directory.appendingPathComponent("Reconnect-auto-contacts.cdb"), options: .atomic)
+        }
+    }
+
+    func testGeneratedEmptyStoresHaveDefaultsAndFreshMetadata() throws {
+        let agendaData = try EmptyAgendaStore.create(timeZone: zone, timestamp: timestamp)
+        let agenda = try PermanentStore(agendaData)
+        XCTAssertEqual(agenda.root, 23)
+        XCTAssertEqual(agenda.streams.count, 23)
+        XCTAssertFalse(String(decoding: try AgendaConverter.convert(agendaData), as: UTF8.self).contains("BEGIN:VEVENT"))
+        var lists = BinaryReader(try agenda.get(1))
+        XCTAssertEqual(try lists.cardinal(), 3)
+        for (uniqueID, name) in [(UInt32(2), "To-do list"), (3, "Notes"), (4, "Personal")] {
+            let streamID = try lists.u32()
+            var list = BinaryReader(try agenda.get(streamID))
+            XCTAssertEqual(try list.u8(), 0)
+            XCTAssertEqual(try list.u32(), streamID)
+            XCTAssertEqual(try list.u32(), uniqueID)
+            XCTAssertEqual(try list.descriptor(), name)
+        }
+        let contactsData = try EmptyContactsStore.create(timestamp: timestamp)
+        let contacts = try PermanentStore(contactsData)
+        XCTAssertEqual(contacts.root, 2)
+        XCTAssertEqual(contacts.streams.count, 11)
+        XCTAssertTrue(String(decoding: try ContactsConverter.convert(contactsData), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        func templateRow(_ data: Data) throws -> ContactRow {
+            let store = try PermanentStore(data)
+            var cluster = BinaryReader(try store.get(3), position: 6)
+            return try ContactRow.read(cluster.take(cluster.cardinal()), store: store)
+        }
+        let first = try templateRow(contactsData)
+        let second = try templateRow(EmptyContactsStore.create(timestamp: timestamp))
+        XCTAssertEqual(first.type, 0x1000130b)
+        XCTAssertNotEqual(first.guid, second.guid)
+        XCTAssertEqual(first.blob, second.blob)
+        var preferences = BinaryReader(try contacts.get(8), position: 7)
+        XCTAssertEqual(try preferences.u8(), 7)
+        XCTAssertEqual(try preferences.u32(), 0)
+        XCTAssertEqual(try preferences.u32(), 3)
+        let time = UInt64(try preferences.u32()) | UInt64(try preferences.u32()) << 32
+        XCTAssertEqual(time, UInt64((timestamp.timeIntervalSince1970 + 62_168_256_000) * 1_000_000))
+    }
+
     func testAgendaCreateMergeAndDuplicateUID() throws {
         let base = SyntheticStore.emptyAgenda()
         let result = try AgendaImporter.convert(meeting, using: base, mode: .createNew, timeZone: zone, timestamp: timestamp)
@@ -78,7 +138,7 @@ final class ImportTests: XCTestCase {
         for index in 0..<4200 {
             input.append(Data("BEGIN:VCARD\nVERSION:3.0\nUID:contact-\(index)\nFN:Contact \(index)\nNOTE:\(String(repeating: "a", count: 300))\nEND:VCARD\n".utf8))
         }
-        let result = try ContactsImporter.convert(input, using: SyntheticStore.contacts(includeCard: false, includeIndex: true), mode: .createNew)
+        let result = try ContactsImporter.create(input)
         XCTAssertEqual(result.addedCount, 4200)
         XCTAssertEqual(try CNContactVCardSerialization.contacts(with: ContactsConverter.convert(result.data)).count, 4200)
         let repeated = try ContactsImporter.convert(input, using: result.data, mode: .merge)
@@ -110,6 +170,16 @@ final class ImportTests: XCTestCase {
         guard let path = ProcessInfo.processInfo.environment["PSION_IMPORT_FIXTURE_DIRECTORY"] else { throw XCTSkip("Private native templates not supplied") }
         let directory = URL(fileURLWithPath: path)
         func fixture(_ name: String) throws -> Data { try Data(contentsOf: directory.appendingPathComponent(name)) }
+        let defaultAgenda = try PermanentStore(EmptyAgendaStore.create(timeZone: zone, timestamp: timestamp))
+        let nativeAgenda = try PermanentStore(fixture("emptyagenda"))
+        for id: UInt32 in [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18, 20, 21, 22, 23] {
+            XCTAssertEqual(try defaultAgenda.get(id), try nativeAgenda.get(id), "Default Agenda stream \(id)")
+        }
+        let defaultContacts = try PermanentStore(EmptyContactsStore.create(timestamp: timestamp))
+        let nativeContacts = try PermanentStore(fixture("NoContacts.cdb"))
+        for id: UInt32 in [1, 2, 4, 5, 6, 7, 9, 10, 11] {
+            XCTAssertEqual(try defaultContacts.get(id), try nativeContacts.get(id), "Default Contacts stream \(id)")
+        }
         let agenda = try AgendaImporter.convert(meeting, using: fixture("emptyagenda"), mode: .createNew, timeZone: zone, timestamp: timestamp)
         XCTAssertEqual(agenda.addedCount, 1)
         let single = try AgendaImporter.convert(meeting, using: fixture("singleagenda"), mode: .merge, timeZone: zone, timestamp: timestamp)

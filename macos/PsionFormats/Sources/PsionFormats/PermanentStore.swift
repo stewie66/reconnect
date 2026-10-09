@@ -7,6 +7,13 @@ struct PermanentStore {
     var root: UInt32
     var streams: [UInt32: [UInt8]]
 
+    init(uids: [UInt32], root: UInt32, streams: [UInt32: [UInt8]]) throws {
+        try require(uids.count == 3 && uids[0] == 0x10000050, "invalid Permanent Store UIDs")
+        self.uids = uids
+        self.root = root
+        self.streams = streams
+    }
+
     init(_ data: Data) throws {
         let bytes = Array(data)
         try require((32...64 * 1024 * 1024).contains(bytes.count), "file size outside supported bounds")

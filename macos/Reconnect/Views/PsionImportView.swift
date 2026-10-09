@@ -24,9 +24,8 @@ struct PsionImportView: View {
                     }
                     .pickerStyle(.segmented)
                     if model.mode == .createNew {
-                        Text("Choose an empty Agenda or Contacts file created on your Psion as the template for the new file.")
+                        Text("Reconnect creates a new Psion file from your source, ready to upload.")
                             .font(.callout).foregroundStyle(.secondary)
-                        PsionImportFileRow(title: "Empty Psion template", url: model.baseURL) { model.chooseBase() }
                     } else {
                         Text("Choose a downloaded Psion file. Import adds entries to a separate copy and skips matching identifiers. It does not update existing entries.")
                             .font(.callout).foregroundStyle(.secondary)

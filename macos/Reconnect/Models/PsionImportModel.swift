@@ -32,7 +32,7 @@ final class PsionImportModel {
     private var sourceData: Data?
     private var baseData: Data?
 
-    var canConvert: Bool { sourceData != nil && baseData != nil && !isConverting }
+    var canConvert: Bool { sourceData != nil && (mode == .createNew || baseData != nil) && !isConverting }
 
     init() {
         mode = PsionImportMode(rawValue: UserDefaults.standard.string(forKey: "psionImportMode") ?? "") ?? .createNew
@@ -57,7 +57,7 @@ final class PsionImportModel {
 
     func chooseBase() {
         let panel = NSOpenPanel()
-        panel.title = mode == .createNew ? "Choose an empty Psion file" : "Choose the Psion file to merge into"
+        panel.title = "Choose the Psion file to merge into"
         panel.message = format == .agenda ? "Choose an ER5 Agenda file. Extensionless Agenda files are supported." : "Choose an ER5 Contacts database (.cdb)."
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -69,15 +69,21 @@ final class PsionImportModel {
     }
 
     func convert() async {
-        guard canConvert, let sourceData, let baseData, let sourceURL, let baseURL else { return }
+        guard canConvert, let sourceData, let sourceURL else { return }
         guard let timeZone = TimeZone(identifier: timeZoneIdentifier) else {
             errorMessage = "Choose a valid time zone for the Psion."; return
         }
         let selectedFormat = format, selectedMode = mode
+        let baseData = baseData, baseURL = selectedMode == .merge ? baseURL : nil
         isConverting = true; status = nil
         defer { isConverting = false }
         do {
             let result = try await Task.detached(priority: .userInitiated) {
+                if selectedMode == .createNew {
+                    if selectedFormat == .agenda { return try AgendaImporter.create(sourceData, timeZone: timeZone) }
+                    return try ContactsImporter.create(sourceData)
+                }
+                guard let baseData else { throw PsionImportError.invalid("choose the Psion file to merge into") }
                 if selectedFormat == .agenda {
                     return try AgendaImporter.convert(sourceData, using: baseData, mode: selectedMode, timeZone: timeZone)
                 }
@@ -91,12 +97,12 @@ final class PsionImportModel {
             panel.title = "Save the converted Psion file"
             panel.allowedContentTypes = [UTType(filenameExtension: selectedFormat.fileExtension) ?? .data]
             panel.canCreateDirectories = true
-            let name = selectedMode == .merge ? baseURL.deletingPathExtension().lastPathComponent + "-merged" : sourceURL.deletingPathExtension().lastPathComponent
+            let name = selectedMode == .merge ? (baseURL ?? sourceURL).deletingPathExtension().lastPathComponent + "-merged" : sourceURL.deletingPathExtension().lastPathComponent
             panel.nameFieldStringValue = name + "." + selectedFormat.fileExtension
             guard panel.runModal() == .OK, let destination = panel.url else { return }
             let scoped = destination.startAccessingSecurityScopedResource()
             defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
-            guard !sameFile(destination, baseURL), !sameFile(destination, sourceURL) else {
+            guard baseURL.map({ !sameFile(destination, $0) }) ?? true, !sameFile(destination, sourceURL) else {
                 throw PsionImportError.invalid("save to a different file so the original stays intact")
             }
             try result.data.write(to: destination, options: .atomic)

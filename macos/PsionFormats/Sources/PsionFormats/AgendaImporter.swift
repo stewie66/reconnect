@@ -3,6 +3,12 @@ import CryptoKit
 
 /// Adds supported iCalendar events to a copy of an ER5 Agenda store.
 public enum AgendaImporter {
+    public static func create(_ calendar: Data, timeZone: TimeZone = .current,
+                              timestamp: Date = Date()) throws -> PsionImportResult {
+        let base = try EmptyAgendaStore.create(timeZone: timeZone, timestamp: timestamp)
+        return try convert(calendar, using: base, mode: .createNew, timeZone: timeZone, timestamp: timestamp)
+    }
+
     public static func convert(_ calendar: Data, using base: Data, mode: PsionImportMode,
                                timeZone: TimeZone = .current, timestamp: Date = Date()) throws -> PsionImportResult {
         let events = try readCalendar(calendar, timeZone: timeZone)

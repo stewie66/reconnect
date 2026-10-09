@@ -1,6 +1,11 @@
 import Foundation
 
 public enum ContactsImporter {
+    public static func create(_ vCards: Data, timestamp: Date = Date()) throws -> PsionImportResult {
+        let base = try EmptyContactsStore.create(timestamp: timestamp)
+        return try convert(vCards, using: base, mode: .createNew, timestamp: timestamp)
+    }
+
     public static func convert(_ vCards: Data, using base: Data, mode: PsionImportMode,
                                timestamp: Date = Date()) throws -> PsionImportResult {
         let cards = try readCards(vCards)
