@@ -53,14 +53,17 @@ actor AgendaCalendarService {
         return CalendarChoice(id: calendar.calendarIdentifier, title: calendar.title + " — " + source.title, writable: true)
     }
 
-    func snapshot(calendarID: String, timeZone: TimeZone, allowSourceOnlyMetadata: Bool = false) throws -> CalendarSnapshot {
+    func snapshot(calendarID: String, timeZone: TimeZone, identityTimeZone: TimeZone? = nil,
+                  allowSourceOnlyMetadata: Bool = false) throws -> CalendarSnapshot {
         try checkAccess()
         store.reset()
         let calendar = try selectedCalendar(calendarID)
+        let identityZone = identityTimeZone ?? timeZone
         var masters: [String: EKEvent] = [:]
         var occurrences: [String: Set<Int>] = [:]
         var editedOccurrences: [String: EventSnapshot] = [:]
-        var conversionOccurrences: [String: [String: EKEvent]] = [:]
+        var detachedSeriesIDs = Set<String>()
+        var sourceOccurrences: [String: [String: EKEvent]] = [:]
         // EventKit silently truncates queries over four years. Fetch the complete supported
         // Agenda range in smaller windows, so out-of-window events never become deletions.
         for year in stride(from: 1980, through: 2100, by: 3) {
@@ -72,9 +75,10 @@ actor AgendaCalendarService {
             let predicate = store.predicateForEvents(withStart: start, end: end, calendars: [calendar])
             for event in store.events(matching: predicate) {
                 if event.isDetached {
+                    detachedSeriesIDs.insert(event.calendarItemIdentifier)
                     // Canceled exceptions are absent appointments; they still exclude the original date.
                     guard event.status != .canceled else { continue }
-                    let single = try occurrenceSnapshot(of: event, timeZone: timeZone,
+                    let single = try occurrenceSnapshot(of: event, timeZone: timeZone, identityTimeZone: identityZone,
                                                         allowSourceOnlyMetadata: allowSourceOnlyMetadata)
                     if let previous = editedOccurrences[single.id], previous.content != single.content {
                         throw failure("Calendar returned conflicting versions of an edited occurrence. Try syncing again.")
@@ -94,35 +98,50 @@ actor AgendaCalendarService {
                     let day = try AgendaSyncContent.LocalDate.from(event.occurrenceDate ?? event.startDate,
                         in: event.isAllDay ? .current : timeZone, allDay: true).day
                     occurrences[identifier, default: []].insert(day)
-                    let sourceZone = masters[identifier]?.timeZone ?? event.timeZone ?? .current
-                    if allowSourceOnlyMetadata, !event.isAllDay, sourceZone != timeZone {
-                        let id = try occurrenceIdentifier(of: event, timeZone: timeZone).identifier()
-                        conversionOccurrences[identifier, default: [:]][id] = event
+                    if allowSourceOnlyMetadata {
+                        let id = try occurrenceIdentifier(of: event, timeZone: identityZone).identifier()
+                        if let previous = sourceOccurrences[identifier]?[id],
+                           previous.startDate != event.startDate || previous.endDate != event.endDate {
+                            throw failure("Calendar returned conflicting versions of a recurring occurrence. Try syncing again.")
+                        }
+                        sourceOccurrences[identifier, default: [:]][id] = event
                     }
                 }
             }
         }
         var series: [EventSnapshot] = []
-        var replacedSeriesIDs = Set<String>()
+        // A finite series can have every occurrence edited or canceled. Its old native repeat
+        // must be retired even when EventKit returns no unchanged occurrence to use as an anchor.
+        var replacedSeriesIDs = allowSourceOnlyMetadata ? detachedSeriesIDs.subtracting(masters.keys) : []
         for (identifier, event) in masters {
+            try Task.checkCancellation()
+            let canKeepNative = nativeRepeatIsSupported(event)
             var projection = try readProjection(of: event, timeZone: timeZone,
+                                                 includingRecurrence: !allowSourceOnlyMetadata || canKeepNative,
                                                  allowSourceOnlyMetadata: allowSourceOnlyMetadata)
             let content: AgendaSyncContent
-            if let convertedEvents = conversionOccurrences[identifier], !convertedEvents.isEmpty {
-                let sourceStart = try AgendaSyncContent.LocalDate.from(event.startDate, in: event.timeZone ?? .current,
-                                                                       allDay: false)
-                let observed = try convertedEvents.values.map {
-                    try AgendaSyncRecurrence.Occurrence(start: .from($0.startDate, in: timeZone, allDay: false),
-                                                       end: .from($0.endDate, in: timeZone, allDay: false))
+            if let regularEvents = sourceOccurrences[identifier], !regularEvents.isEmpty {
+                let sourceZone = event.isAllDay ? TimeZone.current : (event.timeZone ?? .current)
+                let dateZone = event.isAllDay ? TimeZone.current : timeZone
+                var converted: AgendaSyncContent?
+                if canKeepNative {
+                    let sourceStart = try AgendaSyncContent.LocalDate.from(event.startDate, in: sourceZone,
+                                                                           allDay: event.isAllDay)
+                    let observed = try regularEvents.values.map {
+                        try AgendaSyncRecurrence.Occurrence(start: .from($0.startDate, in: dateZone, allDay: event.isAllDay),
+                                                           end: .from($0.endDate, in: dateZone, allDay: event.isAllDay))
+                    }
+                    converted = try AgendaSyncRecurrence.converted(projection.content, sourceStart: sourceStart,
+                                                                   occurrences: observed)
                 }
-                if let converted = try AgendaSyncRecurrence.converted(projection.content, sourceStart: sourceStart,
-                                                                      occurrences: observed) {
+                if let converted {
                     content = converted
-                    projection.notices.insert(.convertedTimeZone)
+                    if !event.isAllDay, sourceZone != timeZone { projection.notices.insert(.convertedTimeZone) }
                 } else {
                     replacedSeriesIDs.insert(identifier)
-                    for occurrence in convertedEvents.values {
-                        var single = try occurrenceSnapshot(of: occurrence, timeZone: timeZone,
+                    for occurrence in regularEvents.values {
+                        try Task.checkCancellation()
+                        var single = try occurrenceSnapshot(of: occurrence, timeZone: timeZone, identityTimeZone: identityZone,
                                                             allowSourceOnlyMetadata: true)
                         single.notices.insert(.expandedRecurrence)
                         if let previous = editedOccurrences[single.id], previous.content != single.content {
@@ -257,16 +276,10 @@ actor AgendaCalendarService {
             result.alarmMinutes = Int(minutes)
         }
         if includingRecurrence, let rules = event.recurrenceRules, !rules.isEmpty {
-            guard rules.count == 1 else { throw failure("Multiple recurrence rules are not supported.") }
-            let rule = rules[0]
-            guard rule.frequency != .monthly, (rule.recurrenceEnd?.occurrenceCount ?? 0) == 0,
-                  rule.daysOfTheMonth?.isEmpty != false, rule.monthsOfTheYear?.isEmpty != false,
-                  rule.daysOfTheYear?.isEmpty != false, rule.weeksOfTheYear?.isEmpty != false,
-                  rule.setPositions?.isEmpty != false,
-                  rule.daysOfTheWeek?.allSatisfy({ $0.weekNumber == 0 }) != false,
-                  rule.frequency == .weekly || rule.daysOfTheWeek?.isEmpty != false else {
-                throw failure("An event has a repeat rule outside the supported daily, weekly or yearly-by-date Agenda profile.")
+            guard nativeRepeatIsSupported(event) else {
+                throw failure("This repeat pattern needs Mac Calendar → Agenda, which copies its occurrences as individual appointments.")
             }
+            let rule = rules[0]
             let weekdays = rule.daysOfTheWeek?.map { (Int($0.dayOfTheWeek.rawValue) + 5) % 7 }.sorted() ?? []
             let sourceStart = try AgendaSyncContent.LocalDate.from(event.startDate, in: event.isAllDay ? .current : (event.timeZone ?? .current),
                                                                    allDay: true)
@@ -303,9 +316,9 @@ actor AgendaCalendarService {
             originalDate: try .from(date, in: event.isAllDay ? .current : timeZone, allDay: event.isAllDay))
     }
 
-    private func occurrenceSnapshot(of event: EKEvent, timeZone: TimeZone,
+    private func occurrenceSnapshot(of event: EKEvent, timeZone: TimeZone, identityTimeZone: TimeZone,
                                     allowSourceOnlyMetadata: Bool) throws -> EventSnapshot {
-        let occurrence = try occurrenceIdentifier(of: event, timeZone: timeZone)
+        let occurrence = try occurrenceIdentifier(of: event, timeZone: identityTimeZone)
         let external = try event.calendarItemExternalIdentifier.map {
             try AgendaSyncOccurrence(calendarItemID: $0, originalDate: occurrence.originalDate).identifier()
         }
@@ -313,6 +326,26 @@ actor AgendaCalendarService {
                                             allowSourceOnlyMetadata: allowSourceOnlyMetadata)
         return EventSnapshot(id: try occurrence.identifier(), externalID: external, recoveryURL: nil,
                              content: AgendaSyncOccurrence.standaloneContent(projection.content), notices: projection.notices)
+    }
+
+    private func nativeRepeatIsSupported(_ event: EKEvent) -> Bool {
+        guard let rules = event.recurrenceRules, !rules.isEmpty else { return !event.hasRecurrenceRules }
+        guard rules.count == 1 else { return false }
+        let rule = rules[0]
+        let frequency: AgendaSyncCalendarRepeat.Frequency
+        switch rule.frequency {
+        case .daily: frequency = .daily
+        case .weekly: frequency = .weekly
+        case .monthly: frequency = .monthly
+        case .yearly: frequency = .yearly
+        @unknown default: return false
+        }
+        return AgendaSyncCalendarRepeat(frequency: frequency, interval: rule.interval,
+            occurrenceCount: rule.recurrenceEnd?.occurrenceCount ?? 0,
+            weekdays: rule.daysOfTheWeek?.map { .init(day: (Int($0.dayOfTheWeek.rawValue) + 5) % 7, ordinal: $0.weekNumber) } ?? [],
+            hasAdditionalSelectors: rule.daysOfTheMonth?.isEmpty == false || rule.monthsOfTheYear?.isEmpty == false ||
+                rule.daysOfTheYear?.isEmpty == false || rule.weeksOfTheYear?.isEmpty == false ||
+                rule.setPositions?.isEmpty == false).canKeepNative
     }
 
     private func selectedCalendar(_ identifier: String) throws -> EKCalendar {

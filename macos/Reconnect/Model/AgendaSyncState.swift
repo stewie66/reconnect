@@ -14,6 +14,7 @@ struct AgendaSyncState: Codable {
     var version = 1
     var links: [Link] = []
     var lastSuccessfulSync: Date?
+    var synchronizedTimeZoneID: String?
 
     static func load(from url: URL) throws -> Self {
         guard FileManager.default.fileExists(atPath: url.path) else { return Self() }

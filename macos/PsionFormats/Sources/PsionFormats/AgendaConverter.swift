@@ -137,11 +137,12 @@ struct AgendaEntry {
                 entry.embedded = true
             }
             try require(raw.last == 6, "missing paragraph terminator")
-            entry.summary = try BinaryReader.text(raw)
+            // The final paragraph marker terminates the native text. Earlier empty paragraphs
+            // belong to the notes; removing all trailing newlines makes valid syncs fail verification.
+            entry.summary = try BinaryReader.text(Array(raw.dropLast()))
                 .replacingOccurrences(of: "\u{000e}", with: "")
                 .replacingOccurrences(of: "\u{0007}", with: "\n")
                 .replacingOccurrences(of: "\u{0006}", with: "\n")
-            while entry.summary.hasSuffix("\n") { entry.summary.removeLast() }
         }
         switch type {
         case 0:

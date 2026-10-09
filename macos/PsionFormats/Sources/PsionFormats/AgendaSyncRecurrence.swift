@@ -15,12 +15,14 @@ public enum AgendaSyncRecurrence {
     /// schedule. A varying local hour or a date pattern Agenda cannot express needs expansion.
     public static func converted(_ content: AgendaSyncContent, sourceStart: AgendaSyncContent.LocalDate,
                                  occurrences: [Occurrence]) throws -> AgendaSyncContent? {
-        guard var rule = content.repeatRule, !occurrences.isEmpty else { return nil }
+        guard var rule = content.repeatRule, !occurrences.isEmpty,
+              (1...Int(UInt16.max)).contains(rule.interval) else { return nil }
         let dayShift = content.start.day - sourceStart.day
         func shifted(_ day: Int) -> Int { ((day + dayShift) % 7 + 7) % 7 }
         if rule.frequency == .weekly {
             rule.weekdays = rule.weekdays.map(shifted).sorted()
             rule.weekStart = shifted(rule.weekStart)
+            guard rule.weekdays.contains((content.start.day + 1) % 7) else { return nil }
         }
         var converted = content
         converted.repeatRule = rule
@@ -29,8 +31,12 @@ public enum AgendaSyncRecurrence {
             $0.end.day - $0.start.day == converted.end.day - converted.start.day
         }) else { return nil }
         let observed = Set(occurrences.map { $0.start.day })
-        guard try observed.isSubset(of: expectedDays(content: converted, rule: rule)) else { return nil }
-        return try excludingMissingOccurrences(in: converted, observedDays: observed)
+        let expected = try expectedDays(content: converted, rule: rule)
+        guard observed.isSubset(of: expected) else { return nil }
+        let excluded = expected.subtracting(observed).union(rule.excludedDays).sorted()
+        guard excluded.count <= 1024 else { return nil }
+        converted.repeatRule?.excludedDays = excluded
+        return converted
     }
 
     /// Only unchanged occurrences count as present. Edited and deleted dates become exclusions;

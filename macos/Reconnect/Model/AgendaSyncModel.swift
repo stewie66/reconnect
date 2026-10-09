@@ -12,14 +12,17 @@ final class AgendaSyncModel {
             if oldValue.agendaPath.lowercased() != settings.agendaPath.lowercased() ||
                 oldValue.calendarID != settings.calendarID || oldValue.timeZoneID != settings.timeZoneID {
                 if let device {
-                    settings.pairingID = AgendaSyncPlanner.pairingIdentifier(device: device.id,
-                        path: settings.agendaPath, calendar: settings.calendarID, timeZone: settings.timeZoneID)
+                    settings.selectPairing(device: device.id, preserving: oldValue)
                 }
                 do {
                     state = try AgendaSyncState.load(from: stateURL)
                     loadingError = nil
                 } catch { loadingError = error.localizedDescription }
                 lastSuccessfulSync = state.lastSuccessfulSync
+                lastMetadata = nil
+                lastMacSnapshot = nil
+            }
+            if oldValue.direction != settings.direction {
                 lastMetadata = nil
                 lastMacSnapshot = nil
             }
@@ -80,6 +83,10 @@ final class AgendaSyncModel {
         rootURL = applicationModel.backupsURL.deletingLastPathComponent()
             .appendingPathComponent("AgendaSync", isDirectory: true).appendingPathComponent(device.id.uuidString, isDirectory: true)
         transport = AgendaSyncTransport(fileServer: device.transfersFileServer, commands: device.remoteCommandServicesClient)
+        settings.selectPairing(device: device.id)
+        if loadingError == nil, let data = try? JSONEncoder().encode(settings) {
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+        }
         do {
             state = try AgendaSyncState.load(from: stateURL)
             lastSuccessfulSync = state.lastSuccessfulSync
@@ -181,6 +188,16 @@ final class AgendaSyncModel {
         do {
             if let loadingError { throw failure(loadingError) }
             guard let timeZone = TimeZone(identifier: configuration.timeZoneID) else { throw failure("Choose a valid Psion time zone.") }
+            let identityTimeZoneID = configuration.pairings.pairing(device: device.id, path: configuration.agendaPath,
+                calendar: configuration.calendarID)?.identityTimeZoneID ?? configuration.timeZoneID
+            guard let identityTimeZone = TimeZone(identifier: identityTimeZoneID) else {
+                throw failure("The saved pairing's time zone is unavailable. Restore its original time-zone setting before syncing.")
+            }
+            let previousZone = state.synchronizedTimeZoneID ?? identityTimeZoneID
+            if configuration.direction == .bidirectional, state.links.contains(where: \.hasBaseline),
+               previousZone != configuration.timeZoneID {
+                throw failure("The Psion time zone changed. Run one sync with Agenda or Mac Calendar selected as the source before enabling Both directions again. Existing mappings are retained.")
+            }
             let path = configuration.agendaPath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard path.range(of: #"^[A-Za-z]:\\[^\r\n]+$"#, options: .regularExpression) != nil else {
                 throw failure("Enter the full Psion file path, such as C:\\Documents\\Agenda.")
@@ -191,6 +208,7 @@ final class AgendaSyncModel {
             }
             status = "Reading Mac Calendar…"
             let macSnapshot = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
+                                                                 identityTimeZone: identityTimeZone,
                                                                  allowSourceOnlyMetadata: configuration.direction == .macToAgenda)
             let macEvents = macSnapshot.events
             reportImportNotices(macEvents)
@@ -223,7 +241,7 @@ final class AgendaSyncModel {
                     // Calendar still owns an expanded series. Retire its old aggregate mapping so
                     // the repeating Agenda entry and its individual appointments cannot coexist.
                     if !macSnapshot.replacedSeriesIDs.contains(oldID) {
-                        try await calendarService.verifyMissing(oldID, timeZone: timeZone)
+                        try await calendarService.verifyMissing(oldID, timeZone: identityTimeZone)
                     }
                 }
             }
@@ -304,6 +322,7 @@ final class AgendaSyncModel {
             }
             try await transport.verifyUnchanged(path: path, original: replacement)
             let finalMac = try await calendarService.snapshot(calendarID: configuration.calendarID, timeZone: timeZone,
+                                                              identityTimeZone: identityTimeZone,
                                                               allowSourceOnlyMetadata: configuration.direction == .macToAgenda).events
             reportImportNotices(finalMac)
             let finalMap = Dictionary(uniqueKeysWithValues: finalMac.map { ($0.id, $0.content) })
@@ -316,6 +335,7 @@ final class AgendaSyncModel {
                 state.links[index].hasBaseline = true
             }
             state.lastSuccessfulSync = Date()
+            state.synchronizedTimeZoneID = configuration.timeZoneID
             try state.save(to: stateURL)
             await transport.finishVerifiedSync()
             lastSuccessfulSync = state.lastSuccessfulSync
@@ -370,7 +390,7 @@ final class AgendaSyncModel {
             case .convertedTimeZone:
                 messages.append("Repeating times for \(appointments) are converted to the Psion time zone.")
             case .expandedRecurrence:
-                messages.append("\(appointments) are copied individually to preserve Calendar's time-zone schedule within 1980–2100.")
+                messages.append("\(appointments) are copied individually to preserve Calendar's repeat schedule within 1980–2100.")
             }
         }
         importNotice = messages.isEmpty ? nil : "Agenda import notes:\n" + messages.joined(separator: "\n")
