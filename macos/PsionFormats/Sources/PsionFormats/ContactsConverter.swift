@@ -68,10 +68,11 @@ public enum ContactsConverter {
     }
 }
 
-private struct ContactTable {
+struct ContactTable {
     var name: String
     var token: UInt32
     var columns: [ContactColumn]
+    var indexes: [ContactIndex] = []
 
     static func read(_ reader: inout BinaryReader) throws -> Self {
         let name = try reader.descriptor(), count = try reader.cardinal()
@@ -85,27 +86,38 @@ private struct ContactTable {
         }
         let clustering = try reader.cardinal()
         try require((1...16).contains(clustering), "invalid DBMS clustering")
-        let token = try reader.u32(), indexes = try reader.cardinal()
-        try require(indexes <= 32, "invalid index count")
-        for _ in 0..<indexes {
-            _ = try reader.descriptor()
-            _ = try reader.take(2) // comparison and uniqueness
+        let token = try reader.u32(), indexCount = try reader.cardinal()
+        try require(indexCount <= 32, "invalid index count")
+        var indexes: [ContactIndex] = []
+        for _ in 0..<indexCount {
+            let name = try reader.descriptor()
+            let comparison = try reader.u8(), unique = try reader.u8()
             let keys = try reader.cardinal()
             try require(keys > 0 && keys <= count, "invalid index key count")
-            for _ in 0..<keys { _ = try reader.descriptor(); _ = try reader.take(2) }
-            _ = try reader.u32()
+            var columns: [String] = [], options: [[UInt8]] = []
+            for _ in 0..<keys { columns.append(try reader.descriptor()); options.append(try reader.take(2)) }
+            indexes.append(ContactIndex(name: name, comparison: comparison, unique: unique, columns: columns, options: options, token: try reader.u32()))
         }
-        return Self(name: name, token: token, columns: columns)
+        return Self(name: name, token: token, columns: columns, indexes: indexes)
     }
 }
 
-private struct ContactColumn {
+struct ContactIndex {
+    var name: String
+    var comparison: UInt8
+    var unique: UInt8
+    var columns: [String]
+    var options: [[UInt8]]
+    var token: UInt32
+}
+
+struct ContactColumn {
     var name: String
     var type: UInt8
     var attributes: UInt8
 }
 
-private struct ContactRow {
+struct ContactRow {
     var id: UInt32
     var type: UInt32
     var guid: String
@@ -148,7 +160,7 @@ private struct ContactBits {
     }
 }
 
-private struct ContactField {
+struct ContactField {
     var index: Int
     var text: String
 

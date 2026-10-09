@@ -73,6 +73,83 @@ struct PermanentStore {
         return bytes
     }
 
+    // Write a compact base TOC, preserving stream handles and their generation bits.
+    // No old physical storage (including deleted payloads) is copied into the new file.
+    func encoded() throws -> Data {
+        let count = Int(streams.keys.map { $0 & 0x00ffffff }.max() ?? 0)
+        try require(count > 0 && streams[root] != nil, "store has no root")
+        guard count == streams.count else {
+            throw PsionConversionError.unsupported("native writing for stores with deleted stream slots; compact the file on the Psion first")
+        }
+        var byIndex: [Int: UInt32] = [:]
+        for handle in streams.keys {
+            let index = Int(handle & 0x00ffffff)
+            try require(index > 0 && byIndex[index] == nil && handle & 0xf0000000 == 0, "invalid stream handle")
+            byIndex[index] = handle
+        }
+        var file = uids.flatMap { BinaryWriter.integer($0) }
+        file += BinaryWriter.integer(UInt32(Self.crc(stride(from: 0, to: 12, by: 2).map { file[$0] })) |
+                                   UInt32(Self.crc(stride(from: 1, to: 12, by: 2).map { file[$0] })) << 16)
+        file += Array(repeating: 0, count: 14)
+        var logical = 0
+        var needsDescriptorSpace = false
+
+        func frame(_ bytes: [UInt8], type: UInt16) throws -> UInt32 {
+            if needsDescriptorSpace {
+                let remaining = 16384 - (logical & 0x3fff)
+                if remaining <= 2 {
+                    file += Array(repeating: 0, count: remaining)
+                    logical += remaining
+                } else { logical += 2 }
+            }
+            let start = logical
+            var cursor = 0
+            var frameType = type
+            repeat {
+                let room = 16384 - (logical & 0x3fff)
+                let size = min(room, bytes.count - cursor)
+                let length = size == room ? 0 : UInt16(size)
+                file += BinaryWriter.integer(UInt32(frameType | length), count: 2)
+                file += bytes[cursor..<cursor + size]
+                cursor += size
+                logical += size
+                frameType = 0xc000
+                try require(file.count <= 64 * 1024 * 1024, "output store exceeds 64 MiB")
+            } while cursor < bytes.count
+            needsDescriptorSpace = logical & 0x3fff != 0
+            return UInt32(start)
+        }
+
+        var offsets: [UInt32] = []
+        for index in 1...count {
+            guard let handle = byIndex[index], let bytes = streams[handle] else {
+                throw PsionConversionError.unsupported("stores with deleted stream slots")
+            }
+            offsets.append(bytes.isEmpty ? UInt32.max : try frame(bytes, type: 0x4000))
+        }
+        var table = BinaryWriter()
+        table.u32(root)
+        table.u32(0)
+        table.u32(UInt32(count))
+        for index in 1...count {
+            table.u8(UInt8(byIndex[index]! >> 24))
+            table.u32(offsets[index - 1])
+        }
+        let reference = try frame(table.bytes, type: 0x8000) + 12
+        let header = [reference &* 2, 0, reference].flatMap { BinaryWriter.integer($0) }
+        file.replaceSubrange(16..<30, with: header + BinaryWriter.integer(UInt32(Self.crc(header)), count: 2))
+        let result = Data(file)
+        _ = try Self(result)
+        return result
+    }
+
+    mutating func add(_ bytes: [UInt8]) throws -> UInt32 {
+        let index = (streams.keys.map { $0 & 0x00ffffff }.max() ?? 0) + 1
+        try require(index < 0x00ffffff, "too many streams")
+        streams[index] = bytes
+        return index
+    }
+
     private static func frames(_ bytes: [UInt8], offset: Int, type: UInt16) throws -> (bytes: [UInt8], ranges: [Range<Int>]) {
         var offset = offset
         var expectedType = type

@@ -21,10 +21,17 @@ import SwiftUI
 public struct FileCommands: Commands {
 
     @FocusedObject private var fileManageableProxy: FileManageableProxy?
+    @Environment(\.openWindow) private var openWindow
 
     public var body: some Commands {
 
         CommandGroup(replacing: .newItem) {
+
+            Button("Convert Files for Psion…") {
+                openWindow(id: "psion-import")
+            }
+
+            Divider()
 
             Button {
                 fileManageableProxy?.createNewFolder()

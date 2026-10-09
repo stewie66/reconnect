@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-/// Read-only ER5 Agenda 1.1.84 export, based on the validated Python handoff.
+/// ER5 Agenda export, based on the validated handoff and native 1.1.144 fixtures.
 public enum AgendaConverter {
     public static func convert(_ data: Data, timestamp: Date = Date()) throws -> Data {
         let store = try PermanentStore(data)
@@ -19,7 +19,7 @@ public enum AgendaConverter {
         guard let modelID = dictionary[0x100000f1] else { throw PsionConversionError.invalid("missing Agenda model") }
         var model = BinaryReader(try store.get(modelID))
         let major = try model.u8(), minor = try model.u8(), build = try model.u16()
-        guard major == 1 && minor == 1 && build == 84 else {
+        guard major == 1 && minor == 1 && [84, 144].contains(build) else {
             throw PsionConversionError.unsupported("Agenda model \(major).\(minor).\(build)")
         }
         var references: [UInt32] = []
@@ -49,13 +49,8 @@ public enum AgendaConverter {
                 records.append(entry)
             }
             // Extended fields are a second pass, after all basic records in the cluster.
-            for entry in records where entry.flags & 0x1000 != 0 {
-                try require(try reader.u32() == 0x110000f1, "invalid extended record")
-                _ = try reader.take(Int(reader.u32())) // global ID
-                _ = try reader.take(Int(reader.u32())) // location in the source encoding
-                guard try reader.u32() == 0 else { throw PsionConversionError.unsupported("Agenda attendees") }
-                _ = try AgendaDate.day(reader.u16())
-                _ = try reader.take(Int(reader.u8()))
+            for index in records.indices where records[index].flags & 0x1000 != 0 {
+                try records[index].readExtended(&reader)
             }
             try reader.end()
             entries += records.filter { !$0.deleted }
@@ -74,7 +69,7 @@ public enum AgendaConverter {
     }
 }
 
-private struct AgendaEntry {
+struct AgendaEntry {
     var type: UInt8
     var entryID: UInt32
     var flags: UInt16
@@ -92,6 +87,19 @@ private struct AgendaEntry {
     var priority: UInt8 = 0
     var repeatRule: AgendaRepeat?
     var alarmPreTime: UInt32?
+    var globalID = ""
+    var location = ""
+
+    mutating func readExtended(_ reader: inout BinaryReader) throws {
+        try require(try reader.u32() == 0x110000f1, "invalid extended record")
+        let length = Int(try reader.u32())
+        try require(length <= 32, "Agenda global ID exceeds the native limit")
+        globalID = try BinaryReader.text(reader.take(length))
+        location = try BinaryReader.text(reader.take(Int(reader.u32())))
+        guard try reader.u32() == 0 else { throw PsionConversionError.unsupported("Agenda attendees") }
+        _ = try AgendaDate.day(reader.u16())
+        _ = try reader.take(Int(reader.u8()))
+    }
 
     static func read(_ reader: inout BinaryReader, store: PermanentStore) throws -> Self {
         let type = try reader.u8(), entryID = try reader.u32(), flags = try reader.u16(), uniqueID = try reader.u32()
@@ -169,6 +177,8 @@ private struct AgendaEntry {
                      "X-PSION-UNIQUE-ID:\(uniqueID)", "X-PSION-FLAGS:\(flags)",
                      "CLASS:\(["PUBLIC", "PRIVATE", "CONFIDENTIAL"][Int(replication)])"]
         if embedded { lines.append("X-PSION-EMBEDDED-TEXT:TRUE") }
+        if !globalID.isEmpty { lines.append("X-PSION-GLOBAL-ID:\(InterchangeText.escape(globalID))") }
+        if !location.isEmpty { lines.append("LOCATION:\(InterchangeText.escape(location))") }
         if type == 1 {
             try require(priority <= 9, "invalid todo priority")
             lines.append("PRIORITY:\(priority)")
@@ -205,12 +215,13 @@ private struct AgendaEntry {
     }
 }
 
-private struct AgendaRepeat {
+struct AgendaRepeat {
     var kind: UInt8
     var end: Int?
     var interval: UInt16
     var forever: Bool
     var days: UInt8 = 0
+    var firstDay: UInt8 = 1
     var exceptions: [Int] = []
 
     static func read(_ reader: inout BinaryReader) throws -> Self {
@@ -223,8 +234,9 @@ private struct AgendaRepeat {
         var result = Self(kind: kind, end: end, interval: interval, forever: forever == 1)
         if kind == 2 {
             result.days = try reader.u8()
-            _ = try reader.u8()
-            try require(result.days > 0 && result.days & 128 == 0, "invalid weekly recurrence days")
+            result.firstDay = try reader.u8()
+            try require(result.days > 0 && result.days & 128 == 0 && result.firstDay > 0 &&
+                        result.firstDay & 128 == 0 && result.firstDay.nonzeroBitCount == 1, "invalid weekly recurrence days or week start")
         }
         let hasExceptions = try reader.u8()
         try require(hasExceptions <= 1, "invalid recurrence exception flag")
@@ -244,6 +256,7 @@ private struct AgendaRepeat {
         if kind == 2 {
             let weekdays = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
             rule += ";BYDAY=" + weekdays.enumerated().filter { days & (1 << $0.offset) != 0 }.map(\.element).joined(separator: ",")
+            if firstDay != 1 { rule += ";WKST=" + weekdays[firstDay.trailingZeroBitCount] }
         }
         if !forever {
             guard let end else { throw PsionConversionError.invalid("bounded recurrence has no end") }
@@ -257,7 +270,7 @@ private struct AgendaRepeat {
     }
 }
 
-private enum AgendaDate {
+enum AgendaDate {
     static func day(_ value: UInt16) throws -> Int? {
         try require(value == 65535 || value <= 44194, "date outside ER5 range")
         return value == 65535 ? nil : Int(value)

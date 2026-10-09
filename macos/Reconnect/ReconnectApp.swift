@@ -38,6 +38,12 @@ struct ReconnectApp: App {
             .environment(appDelegate.applicationModel.transfersModel)
             .environment(appDelegate.applicationModel.navigationModel)
 
+        Window("Convert Files for Psion", id: "psion-import") {
+            PsionImportView()
+        }
+        .defaultSize(width: 640, height: 600)
+        .windowResizability(.contentMinSize)
+
         Settings {
             SettingsView()
         }

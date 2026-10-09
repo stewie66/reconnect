@@ -56,7 +56,7 @@ enum SyntheticStore {
         return store(uid2: 0x1000006d, uid3: 0x10000084, streams: [root, model, clusters, cluster])
     }
 
-    static func contacts() -> Data {
+    static func contacts(includeCard: Bool = true, includeIndex: Bool = false) -> Data {
         let columns: [(String, UInt8, UInt8)] = [("CM_Identifier", 5, 3), ("CM_Type", 5, 0), ("CM_UIDString", 11, 0),
             ("CM_Last_modified", 10, 0), ("CM_Attributes", 6, 0), ("CM_ReplicationCount", 6, 0), ("CM_DeleteFlag", 0, 0), ("CM_TextBlob", 16, 0)]
         var schema = integer(0x10000069) + integer(0x100) + [0] + cardinal(1) + descriptor("CONTACTS") + cardinal(8)
@@ -64,7 +64,10 @@ enum SyntheticStore {
             schema += descriptor(name) + [type, attributes]
             if type == 11 { schema.append(244) }
         }
-        schema += cardinal(16) + integer(4) + cardinal(0)
+        schema += cardinal(16) + integer(4) + cardinal(includeIndex ? 1 : 0)
+        if includeIndex {
+            schema += descriptor("cnt_id_index") + [0, 1] + cardinal(1) + descriptor("CM_Identifier") + [0, 0] + integer(7)
+        }
         let mappings: [UInt32] = [0x1000402e, 0x1000402e, 0x1000402e, 0x1000402e, 0x1000402e,
             0x1000402a, 0x1000402a, 0x1000402a, 0x1000402a, 0x10004020,
             0x10004dea, 0x10004deb, 0x1000401d, 0x10004dec, 0x10004ded, 0x10004dee, 0x10004def,
@@ -98,9 +101,26 @@ enum SyntheticStore {
         }
         let templateRow = row(id: 0, type: 0x1000130b, blobID: 5, size: template.count)
         let cardRow = row(id: 1, type: 0x10001309, blobID: 6, size: card.count)
-        let cluster = integer(0) + integer(3, bytes: 2) + cardinal(templateRow.count) + cardinal(cardRow.count) + templateRow + cardRow
-        let token = integer(3) + integer(0) + cardinal(2) + integer(2)
-        return store(uid2: 0x10000ebe, uid3: 0, streams: [schema, [], cluster, token, template, card])
+        let cluster = integer(0) + integer(includeCard ? 3 : 1, bytes: 2) + cardinal(templateRow.count) +
+            (includeCard ? cardinal(cardRow.count) : []) + templateRow + (includeCard ? cardRow : [])
+        let token = integer(3) + integer(includeCard ? 50 : 49) + cardinal(includeCard ? 2 : 1) + integer(includeCard ? 2 : 1)
+        var streams = [schema, [], cluster, token, template, card]
+        if includeIndex {
+            let index = integer(128) + integer(128) + [1] + cardinal(includeCard ? 2 : 1) + integer(0x41) + Array(repeating: UInt8(0), count: 16)
+            var page = integer(includeCard ? 2 : 1) + integer(0) + integer(48) + integer(0)
+            if includeCard { page += integer(49) + integer(1) }
+            page += Array(repeating: 0, count: 512 - page.count)
+            streams += [index, page]
+        }
+        return store(uid2: 0x10000ebe, uid3: 0, streams: streams)
+    }
+
+    static func emptyAgenda() -> Data {
+        let root = cardinal(1) + integer(0x100000f1) + integer(2)
+        let references: [UInt32] = [4, 4, 3, 5, 6, 7, 8, 9]
+        let model: [UInt8] = [1, 1, 144, 0] + references.flatMap { integer($0) }
+        return store(uid2: 0x1000006d, uid3: 0x10000084,
+                     streams: [root, model, cardinal(0), cardinal(0), [], integer(4), [0], [], Array(repeating: 0, count: 12)])
     }
 
     private static func finish(_ payload: [UInt8], headers: [(UInt32, UInt32)]) -> [UInt8] {
